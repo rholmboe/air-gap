@@ -18,18 +18,18 @@ import (
 
 // Mimics the configuration property file
 type TransferConfiguration struct {
-    id                  string  // unique id when logging events
-    bootstrapServers    string
-    topic               string // topic to read from
-    topicOut            string // topic to write to
-    clientID            string // Id used in kafka for both read and write
+    id                  string              // unique id when logging events
+    bootstrapServers    string              // Kafka servers
+    topic               string              // topic to read from
+    topicOut            string              // topic to write to
+    clientID            string              // Id used in kafka for both read and write
     producer            sarama.AsyncProducer // kafka
-    verbose             bool
-    sendGapsEverySeconds int
-    gapMessageTemplate  string
-    gapSaveFile         string
-    from                string
-    logFileName         string
+    verbose             bool                // print debug messages
+    sendGapsEverySeconds int                // interval for sending gap messages
+    gapMessageTemplate  string              // template for gap messages
+    gapSaveFile         string              // file to save gap state to
+    from                string              // timestamp to start reading from
+    logFileName         string              // log file name
 }
 var config TransferConfiguration
 var keepRunning bool = true
@@ -119,9 +119,7 @@ func readParameters(fileName string) (TransferConfiguration, error) {
 
 
 func sendMessage(id string, topic string, message []byte) {
-    // For extra printouts, change this:
-    verbose := false
-    if verbose {
+    if config.verbose {
         Logger.Printf("id %s", id)
         Logger.Printf("%s Sending cleartext message: %s\n", config.id, string(message))        
     }
@@ -246,7 +244,10 @@ func LoadGaps(fileName string) error {
 
 // main is the entry point of the program.
 // It reads a configuration file from the command line parameter,
-// initializes the necessary variables, and starts the upstream process.
+// initializes the necessary variables, and starts the gap detection process.
+// Gap detection is done by reading from a Kafka topic and checking the 
+// sequence of numbers in the messages. If a number is missing, a gap is detected.
+// Output is formatted for the set-timestamp utility to consume upstream
 func main() {
     if len(os.Args) < 2 {
         Logger.Fatal("Missing command line parameter (configuration file)\n")
