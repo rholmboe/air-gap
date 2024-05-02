@@ -59,6 +59,11 @@ var config TransferConfiguration
 var Logger = log.New(os.Stdout, "", log.LstdFlags)
 
 // Remove, update or read keys from the OS from the privateKeyGlob
+// We want the keys to be in memory so we can decrypt messages. The keys
+// in memory should be the same as the keys on disk. If a key is removed
+// from disk, it should be removed from memory. If a key is added to disk,
+// it should be added to memory. If a key is changed on disk, the new key
+// should be loaded into memory.
 func readPrivateKeys(fileGlob string) []KeyInfo {
     // Read the files
     var fileNames []string
@@ -269,6 +274,7 @@ func readParameters(fileName string) (TransferConfiguration, error) {
 // Old events are removed from the cache by another thread
 var cache = protocol.CreateMessageCache()
 
+// Send a message to Kafka or stdout
 func sendMessage(messageType uint8, id string, topic string, message []byte) {
     // For extra printouts, change this:
     verbose := true
@@ -312,13 +318,14 @@ func handleUdpMessage(receivedBytes []byte) {
     errorMessageEvery := 60 * time.Second
     if ok != nil {
         // Error
-        Logger.Printf("Error parsing message %s, %v\n", receivedBytes, ok)
+        Logger.Fatalf("Error parsing message %s, %v\n", receivedBytes, ok)
     } else {
         if (messageType == protocol.TYPE_KEY_EXCHANGE) {
             // Get the new key from the message
             keyFileNameUsed := readNewKey(payload)
             // and send a key-change log event to Kafka
             message := []byte(fmt.Sprintf("Updating symmetric key with private key file: %s", keyFileNameUsed))
+            Logger.Printf(message)
             sendMessage(protocol.TYPE_STATUS, "", config.topic, message)
         } else if (messageType == protocol.TYPE_MESSAGE) {
             // Decrypt the message
@@ -358,6 +365,7 @@ func handleUdpMessage(receivedBytes []byte) {
         }
     }
 }
+// TODO: Use key id for both symmetric and assymetric keys
 
 // Side effect. Update the config.key parameter
 func readNewKey(message []byte) string {
