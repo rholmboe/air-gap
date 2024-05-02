@@ -1,5 +1,23 @@
 package main
 
+// This program is a simple filter that can be used to filter out packets
+// based on a configuration. The configuration is a comma separated list of
+// numbers. The numbers are divided into three groups of id numbers you would
+// like to send. Example: You want to send every other packet with two different
+// senders (static load balancing):
+// Sender 1 is configured with: 1,3,5
+// Sender 2 is configured with: 2,4,6
+// Now, the first sender will drop packets with id 2, 4, 6 and the second sender
+// will drop packets with id 1, 3, 5.
+// Also, when packets with higher numbers are found, we use the modulo operator
+// so packets from sender 1 will be 1, 3, 5, 7, 9, ... and so forth.
+
+// We can also use this to configure redundancy. Example, we have three senders
+// and we want to deliver every packet twice. We can configure the first
+// sender with 1,2,4,5,7,8 the second with 2,3,5,6,8,9 and the third
+// with 3,4,6,7,9,10. Now, every packet will be delivered twice over three paths.
+
+
 import (
 	"log"
 	"strconv"
@@ -45,6 +63,13 @@ func doSelfTest(groups [][]int64, k int64) bool {
     return true
 }
 
+
+// Test the filter from the command line. Here, we test the filter with a
+// configuration of 2,3,22,23,42,43, that is, we should send the packets
+// with id: 2, 3, 22, 23, 42 and 43. Other instances might send the packets
+// 1, 4, 21, 24, 41 and 44 and so on. It would be sufficient to just add one
+// iteratio (2,3,22,23) but the last group is added to verify that the user
+// has entered the correct configuration.
 func main() {
     config := "2,3,22,23,42,43"
     parts := strings.Split(config, ",")
