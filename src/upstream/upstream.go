@@ -23,29 +23,33 @@ import (
 )
 
 type TransferConfiguration struct {
-    id                  string  // unique id for this upstream
-	nic                 string
-    targetIP            string
-    targetPort          int
-    bootstrapServers    string
-    topic               string
-    groupID             string
-    mtu                 uint16
-    from                string
-    key                 []byte
-    newkey              []byte // a new symmetric key, when successfully sent, copy the value to key
-    publicKey           *rsa.PublicKey
-    publicKeyFile       string
-    source              string
-    generateNewSymmetricKeyEvery    int
-    verbose             bool
-    logFileName         string
+    id                  string          // unique id for this upstream
+	nic                 string          // network interface card
+    targetIP            string          // target IP address
+    targetPort          int             // target port
+    bootstrapServers    string          // Kafka bootstrap servers
+    topic               string          // Kafka topic
+    groupID             string          // Kafka group ID
+    mtu                 uint16          // Maximum Transmission Unit
+    from                string          // Start time for reading from Kafka
+    key                 []byte          // symmetric key in use
+    newkey              []byte          // a new symmetric key, when successfully sent, copy the value to key
+    publicKey           *rsa.PublicKey  // public key for encrypting the symmetric key
+    publicKeyFile       string          // file with the public key
+    source              string          // source of the messages, kafka or random
+    generateNewSymmetricKeyEvery int    // seconds between key generation
+    verbose             bool            // verbose output
+    logFileName         string          // log file name, redirect logging to a file from the console
 }
 var config TransferConfiguration
 var nextKeyGeneration time.Time
 var keepRunning bool = true
+// Start by logging to the console. If a log file is specified in the configuration file, use that
+// instead. The log file will be created if it doesn't exist, and appended to if it does.
+// Any errors creating the log file will be reported to the console.
 var Logger = log.New(os.Stdout, "", log.LstdFlags)
 
+// Create a new symmetric key for the encryption.
 func createNewKey() []byte {
     key := make([]byte, 32)
     _, err := rand.Read(key)
@@ -55,7 +59,7 @@ func createNewKey() []byte {
     return key
 }
 
-
+// Read the public key from a file and return it.
 func readPublicKey(fileName string) *rsa.PublicKey {
     file, err := os.Open(fileName)
     if err != nil {
@@ -90,7 +94,7 @@ func readPublicKey(fileName string) *rsa.PublicKey {
     return pubKey
 }
 
-
+// Parse the configuration file and return a TransferConfiguration struct.
 func readParameters(fileName string) (TransferConfiguration, error) {
     file, err := os.Open(fileName)
     if err != nil {
@@ -238,6 +242,10 @@ func handleKafkaMessage(id string, key []byte, _ time.Time, received []byte) boo
     return keepRunning
 }
 
+// Send random messages instead of reading from Kafka. Use the 
+// handleKafkaMessage function to send the messages as if they were
+// read from Kafka. The id is the kafka topic name _ partition id _ position
+// The key is the value of the event key
 // Set source=random in the property file to run this code.
 // Adjust max and mayby time.Sleep below to fit your needs
 func generateRandom(bootstrapServers string, topic string, groupID string, from string) {
@@ -263,6 +271,8 @@ func generateRandom(bootstrapServers string, topic string, groupID string, from 
     fmt.Printf("generateRandom took %s\n", elapsedTime)
 
 }
+
+// TODO: tag the key with a name.
 
 // Generate a new symmetric key and encrypt the key with the
 // public key from the certificate.
@@ -367,7 +377,7 @@ func main() {
         }    
         config.mtu = uint16(mtuValue)
     }
-    Logger.Printf("MTU: %d\n", config.mtu)
+    Logger.Printf("MTU from NIC: %d\n", config.mtu)
 
     messages := protocol.FormatMessage(protocol.TYPE_STATUS, "STATUS", 
         []byte(fmt.Sprintf("%s %s starting up", protocol.GetTimestamp(), config.id)), config.mtu);
@@ -408,11 +418,13 @@ func main() {
         generateRandom(config.bootstrapServers, config.topic, config.groupID, config.from)
 
     }
+
+    // SIGTERM received, send a message to the downstream that we are shutting down
     messages = protocol.FormatMessage(protocol.TYPE_STATUS, 
         "STATUS", 
         []byte(fmt.Sprintf("%s %s terminating by signal", protocol.GetTimestamp(), config.id)), config.mtu);
     udp.SendMessage(messages[0], address)
-    // Wait until the messages are sent
+    // Wait a while for the messages to be sent
     time.Sleep(100 * time.Millisecond)
 }
 
