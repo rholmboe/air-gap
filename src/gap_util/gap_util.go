@@ -66,7 +66,7 @@ func GetAllGaps(key string) Gaps {
 // Update the gaps to reflect the newly received number
 // Return true iff the message has already been received (duplicate)
 func CheckNextNumber(key string, number int64) bool {
-    var verbose = false
+    var verbose = false // override verbose. Set to false in production
     var returnValue bool = false
     if (verbose) {
         Logger.Printf("checkNextNumber %s %d", key, number)
