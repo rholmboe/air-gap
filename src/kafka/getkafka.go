@@ -22,7 +22,7 @@ var (
 	assignor = "roundrobin"
 	oldest   = true
 	verbose  = false
-	from     = time.Date(1970, 1, 1, 1, 0, 0, 0, time.Local)
+	from     = time.Date(1970, 1, 1, 1, 0, 0, 0, time.Local)  // Set to the beginning of time
 	callback func(string, []byte, time.Time, []byte) bool // Assign a nil value to the callback variable
 )
 
@@ -32,6 +32,7 @@ func ReadFromKafka(brokers string, topics string, group string, timestamp string
 	Logger.Println("Starting a new Sarama consumer")
 
 	if (timestamp != "") {
+		// Don't change the time string, it's a standard format for time parsing! Check the go documentation
 		fromTime, err := time.Parse("2006-01-02T15:04:05-07:00", timestamp)
 		if err != nil {
 			Logger.Panicf("Error parsing from time: %v", err)
@@ -40,6 +41,7 @@ func ReadFromKafka(brokers string, topics string, group string, timestamp string
 		from = fromTime
 		// Also, force zookeeper to start from the beginning
 		// Use a new Id (do not use the from timestamp since we then can't use that twice)
+		// The kafka console consumer also uses this trick
 		group = group + "-" + protocol.GetTimestamp()
 		Logger.Println("Using new group id: " + group)
 	}
