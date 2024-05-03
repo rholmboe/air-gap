@@ -7,6 +7,8 @@ import (
 	"sync"
 )
 
+// Handle a connection
+// Just call the callback function with the data for every received packet
 func handleConnection(conn *net.UDPConn, addr *net.UDPAddr, wg *sync.WaitGroup, callback func(arg []byte), mtu uint16) {
     defer wg.Done()
 
@@ -16,11 +18,10 @@ func handleConnection(conn *net.UDPConn, addr *net.UDPAddr, wg *sync.WaitGroup, 
         fmt.Println(err)
         return
     }
-
-//    fmt.Printf("Received %s from %s\n", string(buf[:n]), addr)
 	callback(buf[:n])
 }
 
+// Start a UDP listener on the assigned port and address
 func ListenUDP(address string, port int, callback func(arg []byte), mtu uint16) {
     addr := net.UDPAddr{
         Port: port,
