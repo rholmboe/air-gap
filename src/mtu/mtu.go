@@ -8,6 +8,7 @@ import (
 	"unsafe"
 )
 
+// Open a UDP connection to the target and get the MTU of the NIC
 func GetMTU(nic string, target string) (int32, error) {
     // Create a UDP connection
     conn, err := net.Dial("udp", target) // "www.google.com:80"
