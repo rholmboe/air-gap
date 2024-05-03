@@ -24,7 +24,7 @@ func assembleMessage(msg MessageCacheEntry) ([]byte, error) {
 }
 
 // Parse a message from a byte array. The message contains a header and a payload
-	// Header is
+// Header is
 	// uint8 1 byte MessageType (see protocol/message_types.go)
 	// uint16 2 bytes MessageNumber 
 	// uint16 2 bytes NrMessages
@@ -125,7 +125,7 @@ func ParseMessage(message []byte, cache *MessageCache) (uint8, string, []byte, e
 		} else {
 			// cache does not contain messageId
 			cache.AddEntry(id,messageNumber, nrMessages, payload)
-			// Discard the part
+			// Discard the part (but keep in the cache)
 			// Will return the message when all parts
 			// have arrived.
 			return TYPE_MULTIPART, "", nil, nil
