@@ -23,7 +23,6 @@ func NrMessages(mtu uint16, id string, message []byte) uint16 {
 	// 4 bytes checksum
 	// 2 bytes length of payload
 	// payload ([] byte)
-	// for now, just add aaaa as the checksum
 	var payloadLength = mtu - 13 - uint16(len(id));
 	// len in Go returns the number of bytes, not the number of characters or runes.
 	var nrMsgs = 1 + uint16(len(message)) / payloadLength;
@@ -58,6 +57,7 @@ func CalculateChecksum(message []byte) string {
 *
 */
 
+// Return a message in the format that can be sent over the network
 func FormatMessage(messageType uint8, id string, message []byte, mtu uint16) [][]byte {
     var result [][]byte
 	payloadLength := uint16(len(message))
