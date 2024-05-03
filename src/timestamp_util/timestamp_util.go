@@ -8,6 +8,14 @@ import (
 	"strings"
 )
 
+// Read the configuration file and return the configuration
+// In the configuration we have a from field. This is the timestamp
+// we want to start reading from. The format is a standard time format
+// in Go. Example: 2020-01-01T15:04:05-07:00
+// When we use gap-detector to find gaps in the data, we want to start
+// from the last gap we found. This is the timestamp we want to save
+// in the configuration file.
+
 // Create an updated array of lines from the configuration file, with the from
 // configuration updated with the supplied newTime string
 func UpdateTimeParameter(fileName string, newTime string) ([]string, error) {
