@@ -123,20 +123,12 @@ func getTimestampFromKafka(topicName string, partitionId int32, offset int64) (t
             break ConsumerLoop
         }
     }
-
-    // messages := partitionConsumer.Messages();
-    // log.Printf("%d", len(messages))
-    // err = <-partitionConsumer.Errors();
     return time.Time{}, err
-    // select {
-    // case msg := <-partitionConsumer.Messages():
-    //     return msg.Timestamp, nil
-    // case err := <-partitionConsumer.Errors():
-    //     log.Println("Failed to consume message:", err)
-    //     return time.Time{}, err
-    // }
 }
 
+// Given a list of ids, return the earliest timestamp of the events
+// ID:s are formatted as {topic_name}_{partition_id}_{row_number}
+// So first extract the topic_name, partition_id and row_number
 func getMinTimestamp(ids []string) string {
     timestamps := []time.Time{}
     for i := range ids {
