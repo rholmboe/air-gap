@@ -109,6 +109,10 @@ targetPort=1234
 bootstrapServers=192.168.153.138:9092
 topic=transfer
 groupID=test
+# The from parameter will issue a new kafka client id
+# and search from the beginning of the topic until the
+# insert time for the event is at least this time, then
+# start to emit the events. Handy for resending of events
 # format for from=2024-01-28T10:24:55+01:00
 from=
 publicKeyFile=certs/server2.pem
@@ -169,16 +173,19 @@ The applications responds to os signals and can be installed as a service in, e.
 See https://fabianlee.org/2022/10/29/golang-running-a-go-binary-as-a-systemd-service-on-ubuntu-22-04/
 
 ## Compile
-First, compile the applications with `go build`.
+Change directory to the application you would like to build (./src/upstream, ...). 
+Compile the applications with `go build`.
 
 ```
-cd upstream
+cd src/upstream
 go build upstream.go
 ```
 
 Now we have a compiled file called `upstream`. We can run the application with `./upstream`, but you will still need a configuration file.
 
 To turn the application into a service we need to create a service file: `/lib/systemd/system/upstreamservice.service`
+Change the paths to where you will install the service binary and comfiguration file
+
 ```properties
 [Unit]
 Description=Upstream Diode service
@@ -215,4 +222,8 @@ sudo systemctl enable upstream.service
 sudo systemctl start upstream
 ```
 
+## Dependencies
+air-gap uses IBM/sarama for the Kafka read/write. For other dependencies, check the go.mod file.
+
 ## License
+See LICENCE file

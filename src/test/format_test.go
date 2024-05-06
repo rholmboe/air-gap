@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"sitia.nu/transfer/protocol"
+	"sitia.nu/airgap/src/protocol"
 )
 
 func TestFormatMessage(t *testing.T) {

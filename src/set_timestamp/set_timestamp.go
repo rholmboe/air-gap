@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/IBM/sarama"
-	"sitia.nu/transfer/timestamp_util"
+	"sitia.nu/airgap/src/timestamp_util"
 )
 
 // Mimics the configuration property file

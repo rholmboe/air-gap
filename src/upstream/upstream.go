@@ -15,11 +15,11 @@ import (
 	"strings"
 	"time"
 
-	"sitia.nu/transfer/kafka"
-	"sitia.nu/transfer/mtu"
-	"sitia.nu/transfer/protocol"
-	"sitia.nu/transfer/timestamp_util"
-	"sitia.nu/transfer/udp"
+	"sitia.nu/airgap/src/kafka"
+	"sitia.nu/airgap/src/mtu"
+	"sitia.nu/airgap/src/protocol"
+	"sitia.nu/airgap/src/timestamp_util"
+	"sitia.nu/airgap/src/udp"
 )
 
 type TransferConfiguration struct {
@@ -145,9 +145,7 @@ func readParameters(fileName string) (TransferConfiguration, error) {
             if (err != nil) {
                 Logger.Fatalf("Error in config targetPort. Ilegal value: %s. Legal values are 0-65535", value)
             } else {
-                if (tmp < 0) {
-                    Logger.Fatalf("Error in config targetPort. Ilegal value: %s. Legal values are 0-65535", value)
-                } else if (tmp > 65535) {
+                if (tmp < 0 || tmp > 65535) {
                     Logger.Fatalf("Error in config targetPort. Ilegal value: %s. Legal values are 0-65535", value)
                 } else {
                     result.targetPort = tmp                    
@@ -172,7 +170,7 @@ func readParameters(fileName string) (TransferConfiguration, error) {
             if ("kafka" == value || "random" == value) {
                 result.source = value
             } else {
-                Logger.Fatalf("Unknown source %s", value)
+                Logger.Fatalf("Unknown source %s. Legal values are 'kafka' or 'random'.", value)
             }
             Logger.Printf("source: %s", value)
         case "verbose":
@@ -201,7 +199,7 @@ func readParameters(fileName string) (TransferConfiguration, error) {
                     Logger.Printf("generateNewSymmetricKeyEvery: %d", tmp)                
                 }
             }
-        }        
+        }
     }
 
     if err := scanner.Err(); err != nil {
@@ -242,6 +240,7 @@ func handleKafkaMessage(id string, key []byte, _ time.Time, received []byte) boo
     return keepRunning
 }
 
+// Test usage only
 // Send random messages instead of reading from Kafka. Use the 
 // handleKafkaMessage function to send the messages as if they were
 // read from Kafka. The id is the kafka topic name _ partition id _ position
@@ -254,7 +253,7 @@ func generateRandom(bootstrapServers string, topic string, groupID string, from 
 
     for i := 2; i <= max; i++ {
         id := topic + "_" + groupID + "_" + strconv.Itoa(i)
-        // Create a random string of 50 printable characters
+        // Create a random string of printable characters
         random := ""
         for j := 0; j < 500; j++ {
             n, _ := rand.Int(rand.Reader, big.NewInt(26))
@@ -271,8 +270,6 @@ func generateRandom(bootstrapServers string, topic string, groupID string, from 
     fmt.Printf("generateRandom took %s\n", elapsedTime)
 
 }
-
-// TODO: tag the key with a name.
 
 // Generate a new symmetric key and encrypt the key with the
 // public key from the certificate.

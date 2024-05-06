@@ -5,8 +5,8 @@ import (
 	"reflect"
 	"testing"
 
-	"sitia.nu/transfer/protocol"
-	"sitia.nu/transfer/udp"
+	"sitia.nu/airgap/src/protocol"
+	"sitia.nu/airgap/src/udp"
 )
 
 func TestSendMessage(t *testing.T) {

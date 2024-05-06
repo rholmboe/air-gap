@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"sitia.nu/transfer/timestamp_util"
+	"sitia.nu/airgap/src/timestamp_util"
 )
 
 var timeStamp time.Time

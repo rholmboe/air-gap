@@ -19,10 +19,11 @@ import (
 
 	"github.com/IBM/sarama"
 	"github.com/google/uuid"
-	"sitia.nu/transfer/kafka"
-	"sitia.nu/transfer/mtu"
-	"sitia.nu/transfer/protocol"
-	"sitia.nu/transfer/udp"
+	"sitia.nu/airgap/src/kafka"
+	"sitia.nu/airgap/src/mtu"
+	"sitia.nu/airgap/src/protocol"
+	"sitia.nu/airgap/src/udp"
+    "sitia.nu/airgap/src/logfile"
 )
 
 // A private key, the filename and the hash of the file
@@ -325,7 +326,7 @@ func handleUdpMessage(receivedBytes []byte) {
             keyFileNameUsed := readNewKey(payload)
             // and send a key-change log event to Kafka
             message := []byte(fmt.Sprintf("Updating symmetric key with private key file: %s", keyFileNameUsed))
-            Logger.Printf(message)
+            Logger.Printf(string(message))
             sendMessage(protocol.TYPE_STATUS, "", config.topic, message)
         } else if (messageType == protocol.TYPE_MESSAGE) {
             // Decrypt the message
@@ -418,7 +419,7 @@ func main() {
 
     // Set the log file name
     if (config.logFileName != "") {
-        err := SetLogFile(config.logFileName)
+        err := logfile.SetLogFile(config.logFileName, Logger)
         if err != nil {
             Logger.Fatal(err)
         }
@@ -501,12 +502,3 @@ func main() {
 
 }
 
-// This needs to be in all main packages
-func SetLogFile(filename string) error {
-    f, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
-    if err != nil {
-        return err
-    }
-    Logger.SetOutput(f)
-    return nil
-}

@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"sitia.nu/transfer/kafka"
-	"sitia.nu/transfer/mtu"
-	"sitia.nu/transfer/protocol"
-	"sitia.nu/transfer/udp"
+	"sitia.nu/airgap/src/kafka"
+	"sitia.nu/airgap/src/mtu"
+	"sitia.nu/airgap/src/protocol"
+	"sitia.nu/airgap/src/udp"
 )
 
 func notestKafkaSendMessage(t *testing.T) {

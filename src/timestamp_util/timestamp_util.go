@@ -43,7 +43,6 @@ func UpdateTimeParameter(fileName string, newTime string) ([]string, error) {
         }        
     }
     
-
     if err := scanner.Err(); err != nil {
         return nil, err
     }

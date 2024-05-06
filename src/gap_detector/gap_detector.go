@@ -10,10 +10,10 @@ import (
 	"time"
 
 	"github.com/IBM/sarama"
-	"sitia.nu/transfer/gap_util"
-	"sitia.nu/transfer/kafka"
-	"sitia.nu/transfer/protocol"
-	"sitia.nu/transfer/timestamp_util"
+	"sitia.nu/airgap/src/gap_util"
+	"sitia.nu/airgap/src/kafka"
+	"sitia.nu/airgap/src/protocol"
+	"sitia.nu/airgap/src/timestamp_util"
 )
 
 // Mimics the configuration property file

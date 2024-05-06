@@ -3,7 +3,7 @@ package test
 import (
 	"testing"
 
-	"sitia.nu/transfer/gap_util"
+	"sitia.nu/airgap/src/gap_util"
 )
 
 func TestAll(t *testing.T) {

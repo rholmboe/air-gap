@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/IBM/sarama"
-	"sitia.nu/transfer/protocol"
+	"sitia.nu/airgap/src/protocol"
 )
 
 // Sarama configuration options
