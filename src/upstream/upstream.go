@@ -105,6 +105,8 @@ func readParameters(fileName string) (TransferConfiguration, error) {
 
     result := TransferConfiguration{}
     scanner := bufio.NewScanner(file)
+    config.verbose = false
+    config.logFileName = ""
     for scanner.Scan() {
         line := scanner.Text()
         parts := strings.SplitN(line, "=", 2)
@@ -113,8 +115,6 @@ func readParameters(fileName string) (TransferConfiguration, error) {
         }
         key := strings.TrimSpace(parts[0])
         value := strings.TrimSpace(parts[1])
-        config.verbose = false
-        config.logFileName = ""
 
         switch key {
         case "id": 

@@ -20,10 +20,10 @@ import (
 	"github.com/IBM/sarama"
 	"github.com/google/uuid"
 	"sitia.nu/airgap/src/kafka"
+	"sitia.nu/airgap/src/logfile"
 	"sitia.nu/airgap/src/mtu"
 	"sitia.nu/airgap/src/protocol"
 	"sitia.nu/airgap/src/udp"
-    "sitia.nu/airgap/src/logfile"
 )
 
 // A private key, the filename and the hash of the file
@@ -176,6 +176,8 @@ func readParameters(fileName string) (TransferConfiguration, error) {
 
     result := TransferConfiguration{}
     scanner := bufio.NewScanner(file)
+    result.target = "kafka"
+    result.verbose = false
     for scanner.Scan() {
         line := scanner.Text()
         parts := strings.SplitN(line, "=", 2)
@@ -184,8 +186,6 @@ func readParameters(fileName string) (TransferConfiguration, error) {
         }
         key := strings.TrimSpace(parts[0])
         value := strings.TrimSpace(parts[1])
-        result.target = "kafka"
-        result.verbose = false
 
         switch key {
         case "id": 
@@ -287,7 +287,7 @@ func sendMessage(messageType uint8, id string, topic string, message []byte) {
         messageKey = id
     }
     if verbose {
-        Logger.Printf("id %s", id)
+        Logger.Printf("id: %s", id)
         Logger.Printf("%s Sending cleartext message to %s: %s ", config.id, config.target, string(message))        
     }
     // If this is an error message, prepend a timestamp
@@ -431,7 +431,8 @@ func main() {
     address := fmt.Sprintf("%s:%d", config.targetIP, config.targetPort)
 
     // The GetMTU will open the connection with UDP on the specified NIC
-	// and be able to read the MTU for that connection.
+	// and be able to read the MTU for that connection. We need the MTU to 
+    // be able to read the correct amount of bytes from the UDP connection
 
     if config.mtu == 0 {
         mtuValue, err := mtu.GetMTU(config.nic, address)
@@ -447,7 +448,7 @@ func main() {
     readPrivateKeys(config.privateKeyGlob)
     
     // Create a new async producer
-    if ("kafka" == config.target) {
+    if "kafka" == config.target {
         Logger.Printf("Connecting to %s\n", config.bootstrapServers)
         conf := sarama.NewConfig()
         conf.Producer.RequiredAcks = sarama.WaitForLocal
