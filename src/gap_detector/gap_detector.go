@@ -12,6 +12,7 @@ import (
 	"github.com/IBM/sarama"
 	"sitia.nu/airgap/src/gap_util"
 	"sitia.nu/airgap/src/kafka"
+	"sitia.nu/airgap/src/logfile"
 	"sitia.nu/airgap/src/protocol"
 	"sitia.nu/airgap/src/timestamp_util"
 )
@@ -263,7 +264,7 @@ func main() {
 
     // Set the log file name
     if (config.logFileName != "") {
-        err := SetLogFile(config.logFileName)
+        err := logfile.SetLogFile(config.logFileName, Logger)
         if err != nil {
             Logger.Fatal(err)
         }
@@ -367,12 +368,3 @@ func main() {
     Logger.Printf("Closing application")
 }
 
-// This needs to be in all main packages
-func SetLogFile(filename string) error {
-    f, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
-    if err != nil {
-        return err
-    }
-    Logger.SetOutput(f)
-    return nil
-}

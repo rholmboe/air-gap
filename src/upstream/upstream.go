@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"sitia.nu/airgap/src/kafka"
+	"sitia.nu/airgap/src/logfile"
 	"sitia.nu/airgap/src/mtu"
 	"sitia.nu/airgap/src/protocol"
 	"sitia.nu/airgap/src/timestamp_util"
@@ -353,7 +354,7 @@ func main() {
 
     // Set the log file name
     if (config.logFileName != "") {
-        err := SetLogFile(config.logFileName)
+        err := logfile.SetLogFile(config.logFileName, Logger)
         if err != nil {
             Logger.Fatal(err)
         }
@@ -425,12 +426,3 @@ func main() {
     time.Sleep(100 * time.Millisecond)
 }
 
-// This needs to be in all main packages
-func SetLogFile(filename string) error {
-    f, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
-    if err != nil {
-        return err
-    }
-    Logger.SetOutput(f)
-    return nil
-}
