@@ -89,7 +89,7 @@ set-timestamp takes a configuration file and a list of, at least one, topicName_
 When set-timestamp has updated the configuration file, just restart the upstream process to start reading at that point in time instead of where it was in the event stream. The configuration file will be updated so that the from value is removed. This way, Kafka will remember where upstream was in the event stream when the application is restarted the next time.
 
 ## Keys
-Generate keystore wich certificate or obtain otherwise.
+Generate keystore with certificate or obtain otherwise.
 ```
 keytool -genkey -alias keyalias -keyalg RSA -validity 3650 -keystore keystore.jks -storetype JKS
 ```
