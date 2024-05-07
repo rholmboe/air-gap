@@ -328,8 +328,11 @@ func handleUdpMessage(receivedBytes []byte) {
             message := []byte(fmt.Sprintf("Updating symmetric key with private key file: %s", keyFileNameUsed))
             Logger.Printf(string(message))
             sendMessage(protocol.TYPE_STATUS, "", config.topic, message)
+        } else if (messageType == protocol.TYPE_CLEARTEXT) {
+            // Cleartext message
+            sendMessage(protocol.TYPE_MESSAGE, messageId, config.topic, payload)    
         } else if (messageType == protocol.TYPE_MESSAGE) {
-            // Decrypt the message
+            // Encrypted message. Decrypt
             decrypted, err := protocol.Decrypt(payload, config.key)
             if (err != nil) {
                 // Error decrypting message. Always send the error message to Kafka

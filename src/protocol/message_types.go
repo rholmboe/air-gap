@@ -7,3 +7,4 @@ const TYPE_STATUS uint8 = 2
 const TYPE_KEY_EXCHANGE	uint8 = 3
 const TYPE_DEBUG uint8 = 4
 const TYPE_MULTIPART uint8 = 5
+const TYPE_CLEARTEXT uint8 = 6

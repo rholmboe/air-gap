@@ -33,6 +33,7 @@ type TransferConfiguration struct {
     groupID             string          // Kafka group ID
     mtu                 uint16          // Maximum Transmission Unit
     from                string          // Start time for reading from Kafka
+    encryption          bool            // encryption on/off
     key                 []byte          // symmetric key in use
     newkey              []byte          // a new symmetric key, when successfully sent, copy the value to key
     publicKey           *rsa.PublicKey  // public key for encrypting the symmetric key
@@ -106,6 +107,7 @@ func readParameters(fileName string) (TransferConfiguration, error) {
     result := TransferConfiguration{}
     scanner := bufio.NewScanner(file)
     config.verbose = false
+    config.encryption = true
     config.logFileName = ""
     for scanner.Scan() {
         line := scanner.Text()
@@ -188,6 +190,20 @@ func readParameters(fileName string) (TransferConfiguration, error) {
                 verboseStr = "false"
             }
             Logger.Printf("verbose: %s", verboseStr)
+        case "encryption":
+            tmp, err := strconv.ParseBool(value)
+            if (err != nil) {
+                Logger.Fatalf("Error in config encryption. Ilegal value: %s. Legal values are true or false", value)
+            } else {
+                result.encryption = tmp
+            }
+            var encryptionStr string
+            if result.encryption {
+                encryptionStr = "true"
+            } else {
+                encryptionStr = "false"
+            }
+            Logger.Printf("encryption: %s", encryptionStr)
         case "generateNewSymmetricKeyEvery": // second
             tmp, err := strconv.Atoi(value)
             if (err != nil) {
@@ -219,9 +235,15 @@ func readParameters(fileName string) (TransferConfiguration, error) {
 func handleKafkaMessage(id string, key []byte, _ time.Time, received []byte) bool {
     // ip:port
     address := fmt.Sprintf("%s:%d", config.targetIP, config.targetPort)
-    ciphertext, err := protocol.Encrypt(received, config.key)
+    if config.encryption {
+        // Encrypt and send
+        ciphertext, err := protocol.Encrypt(received, config.key)
+        message := protocol.FormatMessage(protocol.TYPE_MESSAGE, id, ciphertext, config.mtu)
+    } else {
+        // Send in clear text
+        message := protocol.FormatMessage(protocol.TYPE_CLEARTEXT, id, received, config.mtu)
+    }
 
-    message := protocol.FormatMessage(protocol.TYPE_MESSAGE, id, ciphertext, config.mtu)
     if(config.verbose) {
         Logger.Println(id + " - " + string(received))
     }
@@ -261,7 +283,7 @@ func generateRandom(bootstrapServers string, topic string, groupID string, from 
             random += string('a' + rune(n.Int64()))
         }
         random += " " + id
-        handleKafkaMessage(id, nil, time.Now(), []byte(random))
+        handleKafkaMessage(id, nil, time.Now(), []byte(random), encryption)
         time.Sleep(1 * time.Second)
     }
     id := topic + "_" + groupID + "_" + fmt.Sprint(max + 1)
