@@ -91,7 +91,7 @@ When set-timestamp has updated the configuration file, just restart the upstream
 ## Keys
 Generate keystore with certificate or obtain otherwise.
 ```
-keytool -genkey -alias keyalias -keyalg RSA -validity 3650 -keystore keystore.jks -storetype JKS
+keytool -genkey -alias keyalias -keyalg RSA -validity 365 -keystore keystore.jks -storetype JKS
 ```
 
 Export the java keystore to a PKCS12 keystore:
