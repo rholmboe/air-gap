@@ -1,16 +1,18 @@
 ## air-gap Kafka to Kafka Topic Transfer over UDP with Guaranteed Delivery
-This project aims to solve the problem of transferring events from a Kafka topic in near real time over an unsecure UDP connection with guaranteed once-only delivery of the events. This can be useful, e.g., for transmitting log events over a hardware diode. The information leaving the sending side is encrypted. Mey generation and exchange is handled in the applications.
+This project aims to solve the problem of transferring events from a Kafka topic in near real time over an unsecure UDP connection with guaranteed once-only delivery of the events. This can be useful, e.g., for transmitting log events over a hardware diode. The information leaving the sending side may be encrypted with symmetric keys and the key exchange is automatic with use of public key encryption. 
 
-Any key present in the upstream Kafka event is lost in the transfer since the key field in Kafka downstream is used for gap-detection.
+In Kafka, events may have a key and a value. The key part of events upstreams will be lost in the transmission, since the key part downstream is used for message identification and thus detection of lost messages (gap-detection). 
+
+For resend of lost events that gap-detection identifies, a back channel must be present but can be a manual routine with input from keyboard or from a file transfer. The information is mainly what topic, partition and id to start reading from. When that information is present upstream, you need to run one application that configures upstream to read from a new timestamp (set-timestamp) and then restart upstream to read from the new timestamp. 
 
 ## Notation
 There are four executable files that together constitutes the transfer software.
 - Upstream - on the sending side of the diode, also used as the name of the program that consumes Kafka events and produces UDP packets
 - Downstream - on the receiving side of the diode, also used as the name of the program that receives UDP packets and produces Kafka events for the receiving Kafka
 - gap-detector - The program that consumes the freshly written Kafka events from Downstream and looks for missing events. This will also deduplicate the events, so if an event is received more than once downstream, only the first of these will be delivered
-- set-timestamp - This progam consumes information from the gap-detector and instructs the sending upstream process to restart at an earlier point in time in the upstream Kafka event stream
+- set-timestamp - This progam consumes information from the gap-detector and instructs the sending upstream process to restart at an earlier point in time in the upstream Kafka event stream so the lost events may be sent again
 
-To use guaranteed delivery, you must be able to copy information from the gap-detector that runs downstream to the set-timestamp program that runs upstream. The information that needs to traverse the diode in the wrong direction is basically a topic id and a timestmap for when to start to read and the information is manually inspectable.
+To use guaranteed delivery, you must be able to copy information from the gap-detector that runs downstream to the set-timestamp program that runs upstream. The information that needs to traverse the diode in the wrong direction is basically a topic id, partition id and position for the first lost event. set-timestamp is an application that uses that information, queries Kafka upstream on the last timestamp before that event and configures the upstream application to start reading at that timestamp.
 
 ```
                  Manually bridge the air-gap with topic_partition_position information
@@ -35,7 +37,7 @@ To enable users to get started without Kafka and without hardware diode, use the
 - upstream3.properties
 - downstream3.properties
 
-These properties files are configured for getting a few random strings instead of reading from Kafka and to send without encyption. Change the targetIP in upstream3.properties to the one you would like to send to, and change the targetIP in downstream3.properties to the same value. The IP address must be one that downstrem can bind to and that upstream can send to.
+These properties files are configured for getting a few random strings instead of reading from Kafka and to send with UDP without encyption. Change the targetIP in upstream3.properties to the one you would like to send to, and change the targetIP in downstream3.properties to the same value. The IP address must be one that downstrem can bind to and that upstream can send to.
 
 In one terminal, start the server with:
 ```
