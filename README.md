@@ -29,6 +29,25 @@ upstream reads from a Kafka topic specified in the upstream configuration file. 
 
 Downstream Kafka contains two topics: one that downstream.go writes to and one that gap-detector.go writes to. The first may contain duplicates but the one from gap-detector should very rarely contain duplicates. Consume the gap-detector output topic, and send to your SIEM of choice. The data sent from Kafka upstream to Kafka downstream is treated as bytes and not strings, so any string encoding in upstream should be present in the final Kafka topic. It should be able to correctly send files and images to the downstream Kafka but that is still to be tested. 
 
+## Getting started
+### Very simple use case
+To enable users to get started without Kafka and without hardware diode, use the following properties files:
+- upstream3.properties
+- downstream3.properties
+
+These properties files are configured for getting a few random strings instead of reading from Kafka and to send without encyption. Change the targetIP in upstream3.properties to the one you would like to send to, and change the targetIP in downstream3.properties to the same value. The IP address must be one that downstrem can bind to and that upstream can send to.
+
+In one terminal, start the server with:
+```
+go run src/downstream/downstream.go config/downstream3.properties
+```
+
+In a new terminal, start the client (sender) with:
+```
+go run src/upstream/upstream.go config/upstream3.properties
+```
+A few messages should now be sent from upstream and received by downstream. From here, add encryption and connections to Kafka to enable all features.
+
 ## Principle of Transmission
 ### Upstream
 Upstream has two main purposes, to read events from the upstream Kafka, and to send the events to the UDP receiver. Since the UDP transmission may be insecure, we encrypt the events using symmetric AES256 in GCM mode. The key is generated on startup, and at configurable intervals. The key is also sent over the UDP transmission to the receiver, encrypted with the receiver's public key, that we store in a file upstream. To change the public key, it should suffice to add a new key and change the configuration file to point to the new key. When the next key generation is set, the new key will be used instead of the old.
