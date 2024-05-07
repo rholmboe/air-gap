@@ -235,13 +235,16 @@ func readParameters(fileName string) (TransferConfiguration, error) {
 func handleKafkaMessage(id string, key []byte, _ time.Time, received []byte) bool {
     // ip:port
     address := fmt.Sprintf("%s:%d", config.targetIP, config.targetPort)
+    var message [][]byte
+    var err error
     if config.encryption {
         // Encrypt and send
-        ciphertext, err := protocol.Encrypt(received, config.key)
-        message := protocol.FormatMessage(protocol.TYPE_MESSAGE, id, ciphertext, config.mtu)
+        var ciphertext []byte
+        ciphertext, err = protocol.Encrypt(received, config.key)
+        message = protocol.FormatMessage(protocol.TYPE_MESSAGE, id, ciphertext, config.mtu)
     } else {
         // Send in clear text
-        message := protocol.FormatMessage(protocol.TYPE_CLEARTEXT, id, received, config.mtu)
+        message = protocol.FormatMessage(protocol.TYPE_CLEARTEXT, id, received, config.mtu)
     }
 
     if(config.verbose) {
@@ -283,7 +286,7 @@ func generateRandom(bootstrapServers string, topic string, groupID string, from 
             random += string('a' + rune(n.Int64()))
         }
         random += " " + id
-        handleKafkaMessage(id, nil, time.Now(), []byte(random), encryption)
+        handleKafkaMessage(id, nil, time.Now(), []byte(random))
         time.Sleep(1 * time.Second)
     }
     id := topic + "_" + groupID + "_" + fmt.Sprint(max + 1)
