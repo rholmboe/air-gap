@@ -9,7 +9,10 @@ import (
 func TestAll(t *testing.T) {
     // Test case 1: valid id
     key := "topic_partition"
-	number := int64(1); 
+	number := int64(0);
+	doTest(t, key, number, false)
+
+	number = int64(1); 
 	doTest(t, key, number, false)
 
 	// Test with next number

@@ -23,6 +23,7 @@ import (
 	"sitia.nu/airgap/src/mtu"
 	"sitia.nu/airgap/src/protocol"
 	"sitia.nu/airgap/src/udp"
+	"sitia.nu/airgap/src/version"
 )
 
 type TransferConfiguration struct {
@@ -128,6 +129,9 @@ func readParameters(fileName string, result TransferConfiguration) (TransferConf
     scanner := bufio.NewScanner(file)
     for scanner.Scan() {
         line := scanner.Text()
+        if strings.HasPrefix(line, "#") || strings.TrimSpace(line) == "" {
+            continue
+        }
         parts := strings.SplitN(line, "=", 2)
         if len(parts) != 2 {
             continue
@@ -234,6 +238,9 @@ func readParameters(fileName string, result TransferConfiguration) (TransferConf
                 }
             }
         case "sendingThreads":
+            // Remove the old value for result.sendingThreads
+            result.sendingThreads = nil
+            // Read the new ones
             if err := json.Unmarshal([]byte(value), &result.sendingThreads); err != nil {
                 Logger.Fatalf("Error in config sendingThreads. Illegal value: %s. Legal values are an array of objects", value)
             }
@@ -259,36 +266,44 @@ func readParameters(fileName string, result TransferConfiguration) (TransferConf
 }
 
 func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
-    Logger.Print("Overriding configuration with environment variables...")
+    Logger.Print("Checking configuration from environment variables...")
 
     prefix := "AIRGAP_UPSTREAM_";
     if id := os.Getenv(prefix + "ID"); id != "" {
+        Logger.Print("Overriding id with environment variable: " + prefix + "ID" + " with value: " + id)
         config.id = id
     }
 
     if nic := os.Getenv(prefix + "NIC"); nic != "" {
+        Logger.Print("Overriding nic with environment variable: " + prefix + "NIC" + " with value: " + nic)
         config.nic = nic
     }
 
     if targetIP := os.Getenv(prefix + "TARGET_IP"); targetIP != "" {
+        Logger.Print("Overriding targetIP with environment variable: " + prefix + "TARGET_IP" + " with value: " + targetIP)
         config.targetIP = targetIP
     }
 
     if targetPort := os.Getenv(prefix + "TARGET_PORT"); targetPort != "" {
         if port, err := strconv.Atoi(targetPort); err == nil {
+            Logger.Print("Overriding targetPort with environment variable: " + prefix + "TARGET_PORT" + " with value: " + targetPort)
             config.targetPort = port
         }
     }
     if bootstrapServers := os.Getenv(prefix + "BOOTSTRAP_SERVERS"); bootstrapServers != "" {
+        Logger.Print("Overriding bootstrapServers with environment variable: " + prefix + "BOOTSTRAP_SERVERS" + " with value: " + bootstrapServers)
         config.bootstrapServers = bootstrapServers
     }
     if topic := os.Getenv(prefix + "TOPIC"); topic != "" {
+        Logger.Print("Overriding topic with environment variable: " + prefix + "TOPIC" + " with value: " + topic)
         config.topic = topic
     }
     if groupID := os.Getenv(prefix + "GROUP_ID"); groupID != "" {
+        Logger.Print("Overriding groupID with environment variable: " + prefix + "GROUP_ID" + " with value: " + groupID)
         config.groupID = groupID
     }
     if mtu := os.Getenv(prefix + "MTU"); mtu != "" {
+        Logger.Print("Overriding mtu with environment variable: " + prefix + "MTU" + " with value: " + mtu)
         if mtu == "auto" {
             config.mtu = 0
         } else if mtuInt, err := strconv.Atoi(mtu); err == nil {
@@ -296,28 +311,35 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
         }
     }
     if from := os.Getenv(prefix + "FROM"); from != "" {
+        Logger.Print("Overriding from with environment variable: " + prefix + "FROM" + " with value: " + from)
         config.from = from
     }
     if encryption := os.Getenv(prefix + "ENCRYPTION"); encryption != "" {
+        Logger.Print("Overriding encryption with environment variable: " + prefix + "ENCRYPTION" + " with value: " + encryption)
         config.encryption = encryption == "true"
     }
     if publicKeyFile := os.Getenv(prefix + "PUBLIC_KEY_FILE"); publicKeyFile != "" {
+        Logger.Print("Overriding publicKeyFile with environment variable: " + prefix + "PUBLIC_KEY_FILE" + " with value: " + publicKeyFile)
         config.publicKeyFile = publicKeyFile
     }
     if generateNewSymmetricKeyEvery := os.Getenv(prefix + "GENERATE_NEW_SYMMETRIC_KEY_EVERY"); generateNewSymmetricKeyEvery != "" {
         if generateNewSymmetricKeyEveryInt, err := strconv.Atoi(generateNewSymmetricKeyEvery); err == nil {
+            Logger.Print("Overriding generateNewSymmetricKeyEvery with environment variable: " + prefix + "GENERATE_NEW_SYMMETRIC_KEY_EVERY" + " with value: " + generateNewSymmetricKeyEvery)  
             config.generateNewSymmetricKeyEvery = generateNewSymmetricKeyEveryInt
         }
     }
     if verbose := os.Getenv(prefix + "VERBOSE"); verbose != "" {
+        Logger.Print("Overriding verbose with environment variable: " + prefix + "VERBOSE" + " with value: " + verbose)
         config.verbose = verbose == "true"
     }
     if logFileName := os.Getenv(prefix + "LOG_FILE_NAME"); logFileName != "" {
+        Logger.Print("Overriding logFileName with environment variable: " + prefix + "LOG_FILE_NAME" + " with value: " + logFileName)
         config.logFileName = logFileName
     }
     if sendingThreads := os.Getenv(prefix + "SENDING_THREADS"); sendingThreads != "" {
+        Logger.Print("Overriding sendingThreads with environment variable: " + prefix + "SENDING_THREADS" + " with value: " + sendingThreads)
         if err := json.Unmarshal([]byte(sendingThreads), &config.sendingThreads); err != nil {
-            Logger.Println("Error parsing SENDING_THREADS:", err)
+            Logger.Fatalln("Error parsing SENDING_THREADS:", err)
         }
     }
     return config
@@ -558,6 +580,7 @@ func sendNewKey(address string) {
 // It reads a configuration file from the command line parameter,
 // initializes the necessary variables, and starts the upstream process.
 func main() {
+    Logger.Printf("Upstream version: %s starting up...", version.GitVersion)
     fileName := ""
     if len(os.Args) > 2 {
         Logger.Fatal("Too many command line parameters. Only one parameter is allowed: the configuration file.")
@@ -588,6 +611,7 @@ func main() {
         if err != nil {
             Logger.Fatal(err)
         }
+        Logger.Printf("Upstream version: %s", version.GitVersion)
         Logger.Println("Log to file started up")
         kafka.SetLogger(Logger)
     }

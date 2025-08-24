@@ -13,7 +13,10 @@ import (
 	"sitia.nu/airgap/src/udp"
 )
 
-func notestKafkaSendMessage(t *testing.T) {
+var kafkaTestAddress = "192.168.153.138:9092"
+
+// Todo send to kafka
+func TestKafkaSendMessage(t *testing.T) {
     tests := []struct {
         name     string
         mtu      int
@@ -59,7 +62,6 @@ func notestKafkaSendMessage(t *testing.T) {
 }
 
 // package public
-var kafkaCache = protocol.CreateMessageCache()
 var maxlength uint16 = 1000
 
 func handleKafkaMessage(id string, key []byte, _ time.Time, received []byte) bool {
@@ -73,7 +75,7 @@ func handleKafkaMessage(id string, key []byte, _ time.Time, received []byte) boo
 func TestKafkaReceiverMessage(t *testing.T) {
     name := "default"
     offsetSeconds := 0
-    address := "192.168.153.138:9092"
+    address := kafkaTestAddress
     topic := "transfer"
     group := "transfer"
     from := "2024-01-03T11:34:03+01:00"
@@ -92,7 +94,8 @@ func TestKafkaReceiverMessage(t *testing.T) {
 }
 
 
-func notestSendKafkaMessageEncrypted(t *testing.T) {
+// Todo: add Kafka sending
+func TestSendKafkaMessageEncrypted(t *testing.T) {
     tests := []struct {
         name     string
         mtu      int

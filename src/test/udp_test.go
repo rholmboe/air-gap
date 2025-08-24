@@ -58,7 +58,8 @@ func handleMessage(received []byte) {
     }
 }
 
-func TestReceiverMessage(t *testing.T) {
+// Will set up a udp receiver on port 1234 and print everything that is received on that port. No automatic test case
+func SetupReceiverMessage(t *testing.T) {
     address := "127.0.0.1"
     port := 1234
     mtuLength := uint16(1500)

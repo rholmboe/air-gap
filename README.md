@@ -64,6 +64,23 @@ On downstream startup, a file glob is read from the configuration file. When a k
 #### Performance
 UDP receive is normally faster than Kafka writes. The downstream application tries to safeguard against lost packets by using a lightweight thread that receives events, decrypts them using AES256 (quite fast) and then adds the events to an array. Another thread consumes the array and writes to Kafka using the async protocol (that also returns immediately and processes the write in another thread). If the performance is not enough, first try to add nodes to the Kafka cluster and add the nodes to the bootstrapServers configuration in the downstream process. You can also try to add several events together before writing them to the upstream Kafka, since there is some overhead for each Kafka event, especially for writing. As a last resort, the upstream sender can be set to throttle (no code for that yet), e.g., by adding a small time.Sleep after each sent event. You should be able to securely transmit tens of thousand events every second using one transmission chain, but for large installations you might have to add more sender/receiver chains, as well as upgrade the Kafka instances.
 
+### Automatic resend
+Since UDP is an unreliable protocol, you can set up air-gap to automatically resend logs at specific time intervals. In the upstream property file, add the following property:
+`sendingThreads=[{"Name": seconds-delay}, ... ]`
+
+Example:
+```
+groupID=testGroup
+sendingThreads=[{"now": 0}, {"3minutes-ago": -180}]
+```
+For each name-dealy, a thread will be created in upstream. Each thread connects to Kafka with a group name that consists of the groupID from the property file, a "-" character, and the name from the sendingThreads property. In the example above, two threads will be created. One named "now" with 0 seconds delay and one named "3minutes-ago" with 180 seconds delay.
+
+The thread with name "now" will connecto to Kafka with a group id of "testGroup-now" and the other thread "testGroup-3minutes-ago".
+
+When a thread reads a message in Kafka, it will check if the Kafka timestamp - the delay (delay is a negative number) is at least equal to, or greater than, the current time. If not, it will sleep until the time is right to send.
+
+If a message is read but not delivered (because the thread is sleeping) and the application terminates, then the
+
 ### Gap Detection
 Since UDP diodes only allow traffic in one direction, we need to invent a new feedback loop in case any events are not successfully delivered over the connection. We do this by enumerating all events we get from the upstream Kafka, send them over the UDP connection and use the enumeration as a key for the events in the downstream Kafka.
 
@@ -92,22 +109,22 @@ When set-timestamp has updated the configuration file, just restart the upstream
 
 ## Keys
 Generate keystore with certificate or obtain otherwise.
-```
+```bash
 keytool -genkey -alias keyalias -keyalg RSA -validity 365 -keystore keystore.jks -storetype JKS
 ```
 
 Export the java keystore to a PKCS12 keystore:
-```
+```bash
 keytool -importkeystore  -srckeystore keystore.jks  -destkeystore keystore.p12  -deststoretype PKCS12 -srcalias keyalias
 ```
 
 Export certificate using openssl:
-```
+```bash
 openssl pkcs12 -in keystore.p12  -nokeys -out cert.pem
 ```
 
 Export unencrypted private key:
-```
+```bash
 openssl pkcs12 -in keystore.p12  -nodes -nocerts -out key.pem
 ```
 
@@ -147,6 +164,23 @@ generateNewSymmetricKeyEvery=500
 # Read the MTU from the nic, or set manually
 mtu=auto
 ```
+
+All configuration can be overridden by environment variables. In the case a file is parsed that will be parsed first and may result in configuration errors. After that, any environment variables are checked and, if found, will overwrite the file configuration.
+
+The environment variables are named as:
+```bash
+AIRGAP_UPSTREAM_{variable name in upper case}
+```
+Example:
+```bash
+export AIRGAP_UPSTREAM_ID=NEW-ID
+export AIRGAP_UPSTREAM_NIC=ens0
+export AIRGAP_UPSTREAM_TARGET_IP=255.255.255.255
+...
+```
+ 
+
+Resend will receive a major overhaul so this section is now deprecated:
 
 The same configuration file is used for set-timestamp. set-timestamp uses the bootstrapServers to query for timestamps for each topic partition and position in the set-timestamp arguments. When the earlierst timestamp has been retrieved, the configuration files's from parameter is set to that timestamp. When upstream restarts, it will read all Kafka events from the beginning and discard those before the from timestamp. During the start phase, set-timestamp will revert the from parameter to an empty string so the next startup will use Kafka's stored pointer for where to read from in the future. 
 
@@ -196,10 +230,18 @@ The applications responds to os signals and can be installed as a service in, e.
 See https://fabianlee.org/2022/10/29/golang-running-a-go-binary-as-a-systemd-service-on-ubuntu-22-04/
 
 ## Compile
-Change directory to the application you would like to build (./src/upstream, ...). 
-Compile the applications with `go build`.
-
+There is a Makefile that will get the latest tag from git and save in version.go, then build upstream and downstream.
+```bash
+make            # builds both upstream and downstream
+make upstream   # builds only upstream
+make downstream # builds only downstream
+make clean      # removes binaries and version.go
 ```
+To build manually, change directory to the application you would like to build (./src/upstream, ...). 
+Compile the applications with `go build {filename}`.
+
+Example:
+```bash
 cd src/upstream
 go build upstream.go
 ```
@@ -248,5 +290,5 @@ sudo systemctl start upstream
 ## Dependencies
 air-gap uses IBM/sarama for the Kafka read/write. For other dependencies, check the go.mod file.
 
-## License
+## Licence
 See LICENCE file

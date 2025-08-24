@@ -168,11 +168,12 @@ func TestParseMessageEncrypted(t *testing.T) {
             }
             actual := protocol.FormatMessage(protocol.TYPE_MESSAGE, tt.id, ciphertext, tt.mtu)
             for _, str := range actual {
-                _, _, encrypted, ok := protocol.ParseMessage(str, cache) // Pass the dereferenced value of cache
-                if (ok == nil) {
+                msgType, _, encrypted, ok := protocol.ParseMessage(str, cache) // Pass the dereferenced value of cache
+                if (msgType != protocol.TYPE_MULTIPART) {
                     // Complete message
                     decrypted, _ := protocol.Decrypt(encrypted, key)
                     fmt.Println("Received: " + string(decrypted))
+                    fmt.Println(ok)
                     if ok == nil {
                         // check the result
                         if !reflect.DeepEqual(string(decrypted), tt.message) {
@@ -183,4 +184,5 @@ func TestParseMessageEncrypted(t *testing.T) {
             }
         })
     }
+    // Everything is ok
 }
