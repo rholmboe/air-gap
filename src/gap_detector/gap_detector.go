@@ -351,9 +351,9 @@ func main() {
 		Logger.Fatalf("Error updating the config with the new from value '', err: %s", err)
 	}
 
-	// Now, read from Kafka and call our handler for each message:
-	kafka.ReadFromKafka(config.bootstrapServers, config.topic, config.clientID, config.from, handleKafkaMessage)
-	// The above line will keep processing messages until a signal is received, when we will proceed
+    // Now, read from Kafka and call our handler for each message:
+    kafka.ReadFromKafka("gap_detector", 0, config.bootstrapServers, config.topic, config.clientID, config.from, handleKafkaMessage)
+    // The above line will keep processing messages until a signal is received, when we will proceed
 
 	Logger.Printf("Shutting down gracefully. Please wait...")
 	// Give the Kafka writer some time to catch up

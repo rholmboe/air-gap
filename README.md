@@ -52,7 +52,9 @@ A few messages should now be sent from upstream and received by downstream. From
 
 ## Principle of Transmission
 ### Upstream
-Upstream has two main purposes, to read events from the upstream Kafka, and to send the events to the UDP receiver. Since the UDP transmission may be insecure, we encrypt the events using symmetric AES256 in GCM mode. The key is generated on startup, and at configurable intervals. The key is also sent over the UDP transmission to the receiver, encrypted with the receiver's public key, that we store in a file upstream. To change the public key, it should suffice to add a new key and change the configuration file to point to the new key. When the next key generation is set, the new key will be used instead of the old.
+Upstream has two main purposes, to read events from the upstream Kafka, and to send the events to the UDP receiver. Since the UDP transmission may be insecure, we may encrypt the events using symmetric AES256 in GCM mode. The key is generated on startup, and at configurable intervals. The key is also sent over the UDP transmission to the receiver, encrypted with the receiver's public key, that we store in a file upstream. To change the public key, it should suffice to add a new key and change the configuration file to point to the new key. When the next key generation is set, the new key will be used instead of the old.
+
+The encryption is only enabled if the `publicKeyFile` is et to the downstream public certificate pem file.
 
 ### Downstream
 Downstrem should receive UDP data (encrypted and unencrypted) and write events to the downstream Kafka on a configured topic. When upstream starts, cleartext events will be generated, as well as an encrypted key. The cleartext messages should be forwarded to the downstream Kafka, key exchange messages should be handled internally and encrypted messages should be decrypted and then forwarded to the downstream Kafka.

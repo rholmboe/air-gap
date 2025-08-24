@@ -39,7 +39,7 @@ func ParseMessage(message []byte, cache *MessageCache) (uint8, string, []byte, e
 	sofar := uint16(0)
 	if (length < 13) {
 		// Cannot possibly be a valid message
-		return TYPE_ERROR, "", nil, errors.New(fmt.Sprintf("Too short message. Won't parse. Length is: %d", len(message)))
+		return TYPE_ERROR, "", nil, fmt.Errorf("Too short message. Won't parse. Length is: %d", len(message))
 	}
 	// First byte is the message type
 	messageType := message[0]
@@ -61,7 +61,7 @@ func ParseMessage(message []byte, cache *MessageCache) (uint8, string, []byte, e
 
 	if (idLength + 5 > length) {
 		// Cannot possibly be a valid message
-		return TYPE_ERROR, "", nil, errors.New(fmt.Sprintf("Too long message id length. Won't parse. Length is: %d", idLength))
+		return TYPE_ERROR, "", nil, fmt.Errorf("Too long message id length. Won't parse. Length is: %d", idLength)
 	}
 
 	// Next idLength bytes are the id
@@ -75,7 +75,7 @@ func ParseMessage(message []byte, cache *MessageCache) (uint8, string, []byte, e
 
 	if (2 + sofar > length) {
 		// Cannot possibly be a valid message
-		return TYPE_ERROR, "", nil, errors.New(fmt.Sprintf("Reading payloadLengthBytes will proceed outside of the message."))
+		return TYPE_ERROR, "", nil, fmt.Errorf("Reading payloadLengthBytes will proceed outside of the message.")
 	}
 	// Next 2 bytes are the length of the payload
 	payloadLengthBytes := message[11+idLength:13+idLength]
@@ -83,9 +83,9 @@ func ParseMessage(message []byte, cache *MessageCache) (uint8, string, []byte, e
 	sofar += 2
 	if (payloadLength + sofar > length) {
 		// Cannot possibly be a valid message
-		return TYPE_ERROR, "", nil, errors.New(fmt.Sprintf("Reading payloadLength bytes will proceed outside of the message. Message length: %d, max pointer: %d",
-			length,
-			sofar + payloadLength))
+		return TYPE_ERROR, "", nil, fmt.Errorf("Reading payloadLength bytes will proceed outside of the message. Message length: %d, max pointer: %d",
+	length,
+	sofar+payloadLength)
 	}
 
 	// Next payloadLength bytes are the payload
@@ -93,9 +93,9 @@ func ParseMessage(message []byte, cache *MessageCache) (uint8, string, []byte, e
 	sofar += payloadLength
 
 	if (length != sofar) {
-		return TYPE_ERROR, "", nil, errors.New(fmt.Sprintf("Message length is: %d, but parsed data is: %d",
-			length,
-			sofar))
+		return TYPE_ERROR, "", nil, fmt.Errorf("Message length is: %d, but parsed data is: %d",
+	length,
+	sofar)
 	}
 
 	// verify the checksum

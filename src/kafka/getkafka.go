@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/IBM/sarama"
-	"sitia.nu/airgap/src/protocol"
 )
 
 // Sarama configuration options
@@ -21,30 +20,14 @@ var (
 	version  = sarama.DefaultVersion.String()
 	assignor = "roundrobin"
 	oldest   = true
-	verbose  = false
-	from     = time.Date(1970, 1, 1, 1, 0, 0, 0, time.Local)  // Set to the beginning of time
-	callback func(string, []byte, time.Time, []byte) bool // Assign a nil value to the callback variable
+	verbose  = true
 )
 
-func ReadFromKafka(brokers string, topics string, group string, timestamp string, callbackFunction func(string, []byte, time.Time, []byte) bool) {
-	callback = callbackFunction
+// This is called for each sending thread
+func ReadFromKafka(name string, offsetSeconds int, brokers string, topics string, group string, timestamp string, callbackFunction func(string, []byte, time.Time, []byte) bool) {
 	keepRunning := true
-	Logger.Println("Starting a new Sarama consumer")
+	Logger.Println("Starting a new Sarama consumer: " + name + " with offset: " + fmt.Sprintf("%d", offsetSeconds))
 
-	if (timestamp != "") {
-		// Don't change the time string, it's a standard format for time parsing! Check the go documentation
-		fromTime, err := time.Parse("2006-01-02T15:04:05-07:00", timestamp)
-		if err != nil {
-			Logger.Panicf("Error parsing from time: %v", err)
-		}
-		// Now, copy to the package variable. Used in ConsumeClaim
-		from = fromTime
-		// Also, force zookeeper to start from the beginning
-		// Use a new Id (do not use the from timestamp since we then can't use that twice)
-		// The kafka console consumer also uses this trick
-		group = group + "-" + protocol.GetTimestamp()
-		Logger.Println("Using new group id: " + group)
-	}
 	// set sarama to log to our log file
 	sarama.Logger = Logger
 
@@ -53,13 +36,22 @@ func ReadFromKafka(brokers string, topics string, group string, timestamp string
 		Logger.Panicf("Error parsing Kafka version: %v", err)
 	}
 
-	/**
-	 * Construct a new Sarama configuration.
-	 * The Kafka cluster version has to be defined before the consumer/producer is initialized.
-	 */
 	config := sarama.NewConfig()
 	config.Version = version
-	config.ClientID = "upstream"
+	config.ClientID = name
+
+	// Set initial offset to timestamp
+	var from time.Time
+	if timestamp != "" {
+		t, err := time.Parse("2006-01-02T15:04:05-07:00", timestamp)
+		if err != nil {
+			Logger.Panicf("Error parsing from time: %v", err)
+		}
+		from = t
+	} else {
+		from = time.Now().Add(time.Duration(offsetSeconds) * time.Second)
+	}
+	config.Consumer.Offsets.Initial = sarama.OffsetOldest
 
 	switch assignor {
 	case "sticky":
@@ -76,11 +68,12 @@ func ReadFromKafka(brokers string, topics string, group string, timestamp string
 		config.Consumer.Offsets.Initial = sarama.OffsetOldest
 	}
 
-	/**
-	 * Setup a new Sarama consumer group
-	 */
 	consumer := Consumer{
+		name: name,
 		ready: make(chan bool),
+		from:  from,
+		delay: time.Duration(offsetSeconds) * time.Second,
+		callback: callbackFunction,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -113,7 +106,7 @@ func ReadFromKafka(brokers string, topics string, group string, timestamp string
 	}()
 
 	<-consumer.ready // Await till the consumer has been set up
-	Logger.Println("Sarama consumer up and running!...")
+	Logger.Println("Sarama consumer " + name + " up and running!...")
 
 	sigusr1 := make(chan os.Signal, 1)
 	signal.Notify(sigusr1, syscall.SIGUSR1)
@@ -130,7 +123,7 @@ func ReadFromKafka(brokers string, topics string, group string, timestamp string
 			Logger.Println("terminating: via signal")
 			keepRunning = false
 		case <-sigusr1:
-			toggleConsumptionFlow(client, &consumptionIsPaused)
+			toggleConsumptionFlow(client, &consumptionIsPaused, &consumer)
 		}
 	}
 	cancel()
@@ -140,21 +133,18 @@ func ReadFromKafka(brokers string, topics string, group string, timestamp string
 	}
 }
 
-func toggleConsumptionFlow(client sarama.ConsumerGroup, isPaused *bool) {
-	if *isPaused {
-		client.ResumeAll()
-		Logger.Println("Resuming consumption")
-	} else {
-		client.PauseAll()
-		Logger.Println("Pausing consumption")
-	}
-
+func toggleConsumptionFlow(_ sarama.ConsumerGroup, isPaused *bool, _ *Consumer) {
+	// Optionally use consumer.from for seeking if needed
 	*isPaused = !*isPaused
 }
 
 // Consumer represents a Sarama consumer group consumer
 type Consumer struct {
-	ready chan bool
+	name     string
+	ready    chan bool
+	from     time.Time
+	delay    time.Duration
+	callback func(string, []byte, time.Time, []byte) bool
 }
 
 // Setup is run at the beginning of a new session, before ConsumeClaim
@@ -164,48 +154,42 @@ func (consumer *Consumer) Setup(sarama.ConsumerGroupSession) error {
 	return nil
 }
 
-// Cleanup is run at the end of a session, once all ConsumeClaim goroutines have exited
 func (consumer *Consumer) Cleanup(sarama.ConsumerGroupSession) error {
 	return nil
 }
 
-// ConsumeClaim must start a consumer loop of ConsumerGroupClaim's Messages().
-// Once the Messages() channel is closed, the Handler must finish its processing
-// loop and exit.
 func (consumer *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
-	// NOTE:
-	// Do not move the code below to a goroutine.
-	// The `ConsumeClaim` itself is called within a goroutine, see:
-	// https://github.com/IBM/sarama/blob/main/consumer_group.go#L27-L29
-	delimiter := "_"
-	keepRunning := true
-	for keepRunning {
-		select {
-		case message, ok := <-claim.Messages():
-			if !ok {				
-				Logger.Printf("message channel was closed")
-				return nil
+    delimiter := "_"
+    keepRunning := true
+    for keepRunning {
+        select {
+        case message, ok := <-claim.Messages():
+            if !ok {
+                Logger.Printf("message channel was closed")
+                return nil
+            }
+			sleepTime := time.Until(message.Timestamp.Add(-consumer.delay))
+			if sleepTime > 0 {
+				Logger.Print("Consumer.delay: " + consumer.delay.String())
+				Logger.Print("Delaying message delivery on thread: " + consumer.name + " for " + sleepTime.String())
+				time.Sleep(sleepTime)
 			}
-			if from.Before(message.Timestamp) {
-				if (verbose) {
-					Logger.Printf("Received message from topic %s: key = %s, value = %s, partition = %d, offset = %d\n", message.Topic, string(message.Key), string(message.Value), message.Partition, message.Offset)
-				}
-				id := message.Topic + delimiter +
-						fmt.Sprint(message.Partition) + delimiter +
-						fmt.Sprint(message.Offset)
-				
-				// Emit the message (mostly with udp)
-				keepRunning = callback(id, message.Key, message.Timestamp, message.Value)
-				session.MarkMessage(message, "")
+			if verbose {
+				Logger.Printf("Delivering message in thread %s from topic %s: key = %s, value = %s, partition = %d, offset = %d, msgTime = %s\n", consumer.name, message.Topic, string(message.Key), string(message.Value), message.Partition, message.Offset, message.Timestamp)
 			}
-		// Should return when `session.Context()` is done.
-		// If not, will raise `ErrRebalanceInProgress` or `read tcp <ip>:<port>: i/o timeout` when kafka rebalance. see:
-		// https://github.com/IBM/sarama/issues/1192
-		case <-session.Context().Done():
-			return nil
-		}
-	}
-	// shutting down
-	return nil
+			id := message.Topic + delimiter +
+				fmt.Sprint(message.Partition) + delimiter +
+				fmt.Sprint(message.Offset)
+			keepRunning = consumer.callback(id, message.Key, message.Timestamp, message.Value)
+			session.MarkMessage(message, "")
+        case <-session.Context().Done():
+            return nil
+        default:
+            // Sleep briefly to avoid busy loop
+            time.Sleep(10 * time.Millisecond)
+        }
+    }
+    // shutting down
+    return nil
 }
 

@@ -1,7 +1,5 @@
 src/tmp/downstream.log
-tmp/upstream.log
-tmp/downstream.log
-.gitignore
-src/.DS_Store
+tmp/*
 .DS_Store
-src/upstream/upstream
+src/.DS_Store
+src/upstream/tmp/upstream.log

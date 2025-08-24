@@ -71,6 +71,8 @@ func handleKafkaMessage(id string, key []byte, _ time.Time, received []byte) boo
 }
 
 func TestKafkaReceiverMessage(t *testing.T) {
+    name := "default"
+    offsetSeconds := 0
     address := "192.168.153.138:9092"
     topic := "transfer"
     group := "transfer"
@@ -86,7 +88,7 @@ func TestKafkaReceiverMessage(t *testing.T) {
         log.Panicf("Error from getting MTU for %s %s: %v", toNic, toIP, err)
     }
 
-    kafka.ReadFromKafka(address, topic, group, from, handleKafkaMessage)
+    kafka.ReadFromKafka(name, offsetSeconds, address, topic, group, from, handleKafkaMessage)
 }
 
 

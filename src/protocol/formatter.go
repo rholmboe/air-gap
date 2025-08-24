@@ -96,14 +96,24 @@ func FormatMessage(messageType uint8, id string, message []byte, mtu uint16) [][
 		// Add the id
 		part = append(part, idBytes...)
 
-		var remainingLength = mtu - 13 - uint16(len(id))
-		
-		if (remainingLength < 0) {
+		// Calculate the remaining length for the payload
+		// Header is
+		// uint8 1 byte MessageType
+		// uint16 2 bytes MessageNumber 
+		// uint16 2 bytes NrMessages
+		// uint16 2 bytes Length of ID
+		// ? bytes id
+		// 4 bytes checksum
+		// 2 bytes length of payload
+		// payload ([] byte)
+		var remainingLength int32 = int32(mtu) - 13 - int32(len(id))
+
+		if remainingLength < 0 {
 			log.Panic("Error. The Header is longer than the MTU.")
 		}
-		var payload [] byte = [] byte{}
+		var payload []byte = []byte{}
 		var checksum string
-		if (remainingLength > payloadLength - position) {
+		if int32(payloadLength)-int32(position) <= remainingLength {
 			// The rest of the message fits in this window
 			// Calculate the payload
 			payload = message[position:]
@@ -121,7 +131,7 @@ func FormatMessage(messageType uint8, id string, message []byte, mtu uint16) [][
 			result = append(result, part)
 		} else {
 			// Take a slice of the message 
-			payload := message[position:position + remainingLength]
+			payload = message[position : position+uint16(remainingLength)]
 			checksum = CalculateChecksum(payload)
 			// Convert the checksum to a byte slice
 			checksumBytes := []byte(checksum)
@@ -135,7 +145,7 @@ func FormatMessage(messageType uint8, id string, message []byte, mtu uint16) [][
 			// Add the message to the result
 			result = append(result, part)
 		}
-		position += remainingLength
+		position += uint16(remainingLength)
 		messageNumber++
 	}
 
