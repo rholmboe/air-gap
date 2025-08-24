@@ -3,3 +3,4 @@ tmp/*
 .DS_Store
 src/.DS_Store
 src/upstream/tmp/upstream.log
+config/testcases/
