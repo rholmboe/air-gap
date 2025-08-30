@@ -23,7 +23,7 @@ openssl req -x509 -new -nodes -key kafka-ca.key -sha256 -days 3650 \
 ```
 
 ### Create Kafka Broker Certificates
-Each Kafka broker needs its own cert signed by the CA. Since some organizations use CN (mostly older) and others SAN, Subject Alternative Name, for authentication and authorization, we will create our certificates with both and also test that we can extract the user id from both (see below).
+Each Kafka broker needs its own cert signed by the CA. Since some organizations use CN (mostly older) and others SAN, Subject Alternative Name, for authentication and authorization, we will should create our certificates with both and also test that we can extract the user id from both. Kafka does, however, seem to only parse the Distinguished Name field, so for this guide we will only use CN to extract a user id but we will create the certificates with the SAN attribute set.
 
 For both SAN and CN, we first create a file for each broker, kafka-upstream and kafka-downstream. Note that the CN must be the same as the hostnames in DNS or the hosts file.
 
@@ -278,7 +278,7 @@ ssl.truststore.location=/opt/kafka/config/ssl/airgap-upstream.truststore.jks
 ssl.truststore.password=changeit
 ```
 
-Now you should be able to restart Kafka and run
+Now you should be able to restart Kafka and run (we only have one kafka so the producer.ssl.properties will work as a consumer.ssl.properties too)
 ```bash
 bin/kafka-console-consumer.sh --topic downstream --bootstrap-server kafka-upstream.mydomain.com:9093 --consumer.config ./config/producer.ssl.properties --from-beginning
 ```
@@ -292,4 +292,171 @@ Now, we up the difficulty a bit. We add authorization so clients not only need t
 ## Authorization
 When we created the airgap-* certificates, we added a name to them: `airgap-upstream-client` and `airgap-downstream-client`. We will now use those as identifiers in Kafka for authorization.
 
-To be continued...
+Kafka seems to only use DN for principal mappings, so we will use the CN instead of SAN for that.
+From https://kafka.apache.org/24/generated/kafka_config.html:
+For SSL authentication, the principal will be derived using the rules defined by `ssl.principal.mapping.rules` applied on the distinguished name from the client certificate if one is provided;...
+
+
+First we must require mTLS in the Kafka config:
+In the above `server.properties` file, add the following:
+
+```properties
+# Require client authentication (mTLS)
+ssl.client.auth=required
+
+# Enable authorization (Kafka ≥ 3.x KRaft or ZK)
+authorizer.class.name=org.apache.kafka.metadata.authorizer.StandardAuthorizer
+# Default deny everyone
+allow.everyone.if.no.acl.found=false
+
+# Make our kafka-upstream.mydomain.com user (the user in the Kafka upstream certificate) admin
+super.users=User:kafka-upstream.mydomain.com
+
+# And map the CN name to the user name from the certificate.
+# This regex should be able to extract names from both the Kafka and upstream/downstream certificates:
+ssl.principal.mapping.rules=RULE:^CN=([a-zA-Z0-9.-]+),?.*$/$1/
+```
+
+Also, change this line
+
+```properties
+listeners=PLAINTEXT://0.0.0.0:9092,SSL://0.0.0.0:9093,CONTROLLER://:9083
+```
+to
+```properties
+listeners=SSL://0.0.0.0:9093,CONTROLLER://:9083
+```
+and
+
+```properties
+advertised.listeners=PLAINTEXT://192.168.153.144:9092,SSL://kafka-upstream.mydomain.com:9093
+```
+to
+```properties
+advertised.listeners=SSL://kafka-upstream.mydomain.com:9093
+```
+
+If you have a cluster, the `inter.broker.listener.name` property must also be set to `SSL` and all the Kafka cluster certificate's CN added as admin with the property `super.users`.
+
+Now, the only way for a broker to access Kafka is with TLS.
+
+Save and restart your Kafka
+
+### Test without certificate
+First, try to access your Kafka without TLS
+
+```bash
+bin/kafka-console-consumer.sh --topic downstream --bootstrap-server kafka-upstream.mydomain.com:9092  --from-beginning
+```
+
+The connection should fail.
+
+### Test with kafka-upstream certificate
+Copy the following files to `/opt/kafka/ssl/.`.
+* kafka-upstream.p12
+* kafka-upstream.truststore.jks
+* kafka-upstream.keystore.jks
+
+Create a file config/consumer.mtls.properties
+```properties
+security.protocol=SSL
+ssl.truststore.location=/opt/kafka/ssl/kafka-upstream.truststore.jks
+ssl.truststore.password=changeit
+ssl.keystore.location=/opt/kafka/ssl/kafka-upstream.keystore.jks
+ssl.keystore.password=changeit
+ssl.key.password=changeit
+```
+
+Now, this command should succeed. 
+
+```bash
+bin/kafka-console-consumer.sh --topic downstream --bootstrap-server kafka-upstream.mydomain.com:9093 --consumer.config config/consumer.mtls.properties --from-beginning
+```
+
+There might not be any data in Kafka but in that case, the console consumer should be waiting for data to print.
+
+### AirGap certificate to Kafka
+Now it's time to add the client certificates to AirGap and connect to Kafka with mTLS.
+
+First, add the topic to Kafka if it doesn't exists.
+```bash
+bin/kafka-topics.sh --create --topic upstream --bootstrap-server kafka-upstream.mydomain.com:9093 --command-config config/consumer.mtls.properties
+```
+
+and the downstream topic too:
+```bash
+bin/kafka-topics.sh --create --topic downstream --bootstrap-server kafka-upstream.mydomain.com:9093 --command-config config/consumer.mtls.properties
+```
+
+
+Then, set the permissions so that `airgap-upstream-client` can read from and write to the `upstream` topic.
+```bash
+bin/kafka-acls.sh \
+  --bootstrap-server kafka-upstream.mydomain.com:9093 \
+  --command-config config/consumer.mtls.properties \
+  --add --allow-principal "User:airgap-upstream-client" \
+  --operation Write --operation Read --topic upstream
+```
+
+the `airgap-downstream-client` must be able to write to the `downstream` topic.
+```bash
+bin/kafka-acls.sh \
+  --bootstrap-server kafka-upstream.mydomain.com:9093 \
+  --command-config config/consumer.mtls.properties \
+  --add --allow-principal "User:airgap-downstream-client" \
+  --operation Write --topic downstream
+```
+
+
+and check the permissions with:
+```bash
+bin/kafka-acls.sh --bootstrap-server kafka-upstream.mydomain.com:9093 --command-config config/consumer.mtls.properties --list --topic upstream
+```
+
+Now we should be able to use the command line tools to create events in Kafka. Note that if you are using LogGenerator to generate logs in Kafka, that utility doesn't support TLS so you will have to open a plaintext port for that.
+
+```bash
+bin/kafka-console-consumer.sh --topic upstream --bootstrap-server kafka-upstream.mydomain.com:9093 --consumer.config config/consumer.mtls.properties --from-beginning
+```
+
+If the command line tool can access the topic without errors, you can proceed to adding the certificates to air-gap.
+
+air-gap uses consumer groups and Kafka will neeed ACL:s for those too. The consumer groups are named `group`-`name` from the configuration. The `group` parameter is set with the configuration `groupID`, or `AIRGAP_UPSTREAM_GROUP_ID` environment variable. The `name` parameter is the thread name from the `sendingThreads` array. If no `sendingThreads` is given, a default `{"now": 0}`is used so in that case, the name is `now`.
+
+The easiest way here is to add an ACL that accepts all groups:
+```bash
+bin/kafka-acls.sh --bootstrap-server kafka-upstream.mydomain.com:9093 --command-config config/consumer.mtls.properties --add --allow-principal User:airgap-upstream-client --operation Read --group '*'
+```
+
+Or, if you want to be more restrictive, you can use:
+```bash
+bin/kafka-acls.sh --bootstrap-server kafka-upstream.mydomain.com:9093 --command-config config/consumer.mtls.properties --add --allow-principal User:airgap-upstream-client --operation Read --group test-No-delay
+```
+
+Start the upstream air-gap application:
+```bash
+go run src/upstream/upstream.go config/testcases/upstream-airgap-4.properties
+```
+
+If the upstream topic is empty, you can manually add events with the following command.
+```bash
+bin/kafka-acls.sh --bootstrap-server kafka-upstream.mydomain.com:9093 --command-config config/consumer.mtls.properties --add --allow-principal User:airgap-upstream-client --operation Read --group '*'
+```
+
+Add events and press enter to send them to Kafka. Ctrl-C to stop.
+
+The upstream air-gap application should log that values are received and handled.
+
+Congratulations. You can now read from Kafka. To configure downstream for Kafka mTLS, add the 
+```properties
+# Certificate file
+certFile=certs/tmp/airgap-downstream.crt
+# Key file
+keyFile=certs/tmp/airgap-downstream.key
+# CA file
+caFile=certs/tmp/kafka-ca.crt
+```
+
+properties to the downstream property file, or set them as environment variables. 
+
+-End

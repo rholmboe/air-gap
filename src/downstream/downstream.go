@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -24,6 +25,7 @@ import (
 	"sitia.nu/airgap/src/mtu"
 	"sitia.nu/airgap/src/protocol"
 	"sitia.nu/airgap/src/udp"
+	"sitia.nu/airgap/src/version"
 )
 
 // A private key, the filename and the hash of the file
@@ -37,28 +39,31 @@ type KeyInfo struct {
 	privateKeyHash     string
 }
 
-// Mimics the configuration property file
+// TransferConfiguration struct definition
 type TransferConfiguration struct {
-	id               string // unique id for this downstrem
+	id               string
 	nic              string
 	targetIP         string
 	targetPort       int
 	bootstrapServers string
 	topic            string
-	clientID         string
 	mtu              uint16
 	from             string
 	key              []byte    // symmetric
 	keyInfos         []KeyInfo // array of private keys
 	privateKeyGlob   string
-	producer         sarama.AsyncProducer // kafka
 	target           string
 	verbose          bool
 	logFileName      string
+	certFile         string
+	keyFile          string
+	caFile           string
+	producer         sarama.AsyncProducer
+	clientID         string
 }
 
-var config TransferConfiguration
 var Logger = log.New(os.Stdout, "", log.LstdFlags)
+var config TransferConfiguration
 
 // Remove, update or read keys from the OS from the privateKeyGlob
 // We want the keys to be in memory so we can decrypt messages. The keys
@@ -104,7 +109,7 @@ func readPrivateKeys(fileGlob string) []KeyInfo {
 		file, err := os.Open(fileName)
 		if err != nil {
 			// File open error
-			sendMessage(protocol.TYPE_ERROR, "", config.topic, []byte(fmt.Sprintf("Can't read private key from file %s, %v", fileName, err)))
+			sendMessage(protocol.TYPE_ERROR, "", config.topic, fmt.Appendf(nil, "Can't read private key from file %s, %v", fileName, err))
 		}
 		defer file.Close()
 
@@ -129,7 +134,7 @@ func readPrivateKeys(fileGlob string) []KeyInfo {
 		// Decode the base64 encoded variable
 		derData, err := base64.StdEncoding.DecodeString(b64Data)
 		if err != nil {
-			sendMessage(protocol.TYPE_ERROR, "", config.topic, []byte(fmt.Sprintf("Error decoding base64 data: %v", err)))
+			sendMessage(protocol.TYPE_ERROR, "", config.topic, fmt.Appendf(nil, "Error decoding base64 data: %v", err))
 		}
 		// hash the key so we can see if it's loaded already
 		derString := fmt.Sprintf("%x", sha256.Sum256(derData))
@@ -138,7 +143,7 @@ func readPrivateKeys(fileGlob string) []KeyInfo {
 		addKey := true
 		for j := 0; j < len(config.keyInfos); j++ {
 			if config.keyInfos[j].privateKeyHash == derString {
-				sendMessage(protocol.TYPE_ERROR, "", config.topic, []byte(fmt.Sprintf("Key file %s already loaded", config.keyInfos[j].privateKeyFilename)))
+				sendMessage(protocol.TYPE_ERROR, "", config.topic, fmt.Appendf(nil, "Key file %s already loaded", config.keyInfos[j].privateKeyFilename))
 				addKey = false
 			}
 		}
@@ -146,7 +151,7 @@ func readPrivateKeys(fileGlob string) []KeyInfo {
 		// Parse the DER encoded private key
 		key, err := x509.ParsePKCS8PrivateKey(derData)
 		if err != nil {
-			sendMessage(protocol.TYPE_ERROR, "", config.topic, []byte(fmt.Sprintf("Error parsing private key: %v", err)))
+			sendMessage(protocol.TYPE_ERROR, "", config.topic, fmt.Appendf(nil, "Error parsing private key: %v", err))
 		}
 
 		privateKey, ok := key.(*rsa.PrivateKey)
@@ -161,23 +166,33 @@ func readPrivateKeys(fileGlob string) []KeyInfo {
 				privateKeyHash:     derString,
 			}
 			config.keyInfos = append(config.keyInfos, keyInfo)
-			sendMessage(protocol.TYPE_STATUS, "", config.topic, []byte(fmt.Sprintf("Successfully loaded key file: %s", fileName)))
+			sendMessage(protocol.TYPE_STATUS, "", config.topic, fmt.Appendf(nil, "Successfully loaded key file: %s", fileName))
 		}
 	}
 	return config.keyInfos
 }
 
+func defaultConfiguration() TransferConfiguration {
+	config := TransferConfiguration{}
+	config.verbose = false
+	config.id = "default_upstream"
+	config.target = "kafka"
+	config.logFileName = ""
+	config.mtu = 0 // default auto
+	return config
+}
+
 // Read the configuration file and return the configuration
-func readParameters(fileName string) (TransferConfiguration, error) {
+func readParameters(fileName string, result TransferConfiguration) (TransferConfiguration, error) {
+	Logger.Print("Reading configuration from file " + fileName)
 	file, err := os.Open(fileName)
 	if err != nil {
-		return TransferConfiguration{}, err
+		// No file, but that's ok. Maybe the user only uses environment variables
+		return TransferConfiguration{}, nil
 	}
 	defer file.Close()
 
-	result := TransferConfiguration{}
 	scanner := bufio.NewScanner(file)
-	result.target = "kafka"
 	result.verbose = false
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -260,6 +275,15 @@ func readParameters(fileName string) (TransferConfiguration, error) {
 			} else {
 				Logger.Fatalf("Unknown target %s", value)
 			}
+		case "certFile":
+			result.certFile = value
+			Logger.Printf("certFile: %s", value)
+		case "keyFile":
+			result.keyFile = value
+			Logger.Printf("keyFile: %s", value)
+		case "caFile":
+			result.caFile = value
+			Logger.Printf("caFile: %s", value)
 		}
 	}
 
@@ -268,6 +292,338 @@ func readParameters(fileName string) (TransferConfiguration, error) {
 	}
 
 	return result, nil
+}
+
+func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
+	Logger.Print("Checking configuration from environment variables...")
+
+	prefix := "AIRGAP_DOWNSTREAM_"
+	if id := os.Getenv(prefix + "ID"); id != "" {
+		Logger.Print("Overriding id with environment variable: " + prefix + "ID" + " with value: " + id)
+		config.id = id
+	}
+
+	if nic := os.Getenv(prefix + "NIC"); nic != "" {
+		Logger.Print("Overriding nic with environment variable: " + prefix + "NIC" + " with value: " + nic)
+		config.nic = nic
+	}
+
+	if targetIP := os.Getenv(prefix + "TARGET_IP"); targetIP != "" {
+		Logger.Print("Overriding targetIP with environment variable: " + prefix + "TARGET_IP" + " with value: " + targetIP)
+		config.targetIP = targetIP
+	}
+
+	if targetPort := os.Getenv(prefix + "TARGET_PORT"); targetPort != "" {
+		if port, err := strconv.Atoi(targetPort); err == nil {
+			Logger.Print("Overriding targetPort with environment variable: " + prefix + "TARGET_PORT" + " with value: " + targetPort)
+			config.targetPort = port
+		}
+	}
+	if bootstrapServers := os.Getenv(prefix + "BOOTSTRAP_SERVERS"); bootstrapServers != "" {
+		Logger.Print("Overriding bootstrapServers with environment variable: " + prefix + "BOOTSTRAP_SERVERS" + " with value: " + bootstrapServers)
+		config.bootstrapServers = bootstrapServers
+	}
+	if topic := os.Getenv(prefix + "TOPIC"); topic != "" {
+		Logger.Print("Overriding topic with environment variable: " + prefix + "TOPIC" + " with value: " + topic)
+		config.topic = topic
+	}
+	if mtu := os.Getenv(prefix + "MTU"); mtu != "" {
+		Logger.Print("Overriding mtu with environment variable: " + prefix + "MTU" + " with value: " + mtu)
+		if mtu == "auto" {
+			config.mtu = 0
+		} else if mtuInt, err := strconv.Atoi(mtu); err == nil {
+			config.mtu = uint16(mtuInt)
+		}
+	}
+	if from := os.Getenv(prefix + "FROM"); from != "" {
+		Logger.Print("Overriding from with environment variable: " + prefix + "FROM" + " with value: " + from)
+		config.from = from
+	}
+	if privateKeyGlob := os.Getenv(prefix + "PRIVATE_KEY_GLOB"); privateKeyGlob != "" {
+		Logger.Print("Overriding privateKeyGlob with environment variable: " + prefix + "PRIVATE_KEY_GLOB" + " with value: " + privateKeyGlob)
+		config.privateKeyGlob = privateKeyGlob
+	}
+	if target := os.Getenv(prefix + "TARGET"); target != "" {
+		Logger.Print("Overriding target with environment variable: " + prefix + "TARGET" + " with value: " + target)
+		config.target = target
+	}
+	if verbose := os.Getenv(prefix + "VERBOSE"); verbose != "" {
+		Logger.Print("Overriding verbose with environment variable: " + prefix + "VERBOSE" + " with value: " + verbose)
+		config.verbose = verbose == "true"
+	}
+	if logFileName := os.Getenv(prefix + "LOG_FILE_NAME"); logFileName != "" {
+		Logger.Print("Overriding logFileName with environment variable: " + prefix + "LOG_FILE_NAME" + " with value: " + logFileName)
+		config.logFileName = logFileName
+	}
+	if certFile := os.Getenv(prefix + "CERT_FILE"); certFile != "" {
+		Logger.Print("Overriding certFile with environment variable: " + prefix + "CERT_FILE" + " with value: " + certFile)
+		config.certFile = certFile
+	}
+	if keyFile := os.Getenv(prefix + "KEY_FILE"); keyFile != "" {
+		Logger.Print("Overriding keyFile with environment variable: " + prefix + "KEY_FILE" + " with value: " + keyFile)
+		config.keyFile = keyFile
+	}
+	if caFile := os.Getenv(prefix + "CA_FILE"); caFile != "" {
+		Logger.Print("Overriding caFile with environment variable: " + prefix + "CA_FILE" + " with value: " + caFile)
+		config.caFile = caFile
+	}
+
+	return config
+}
+
+func connectToKafka(configuration TransferConfiguration) {
+	Logger.Printf("Connecting to %s\n", config.bootstrapServers)
+	// Check if we have TLS to Kafka
+	conf := sarama.NewConfig()
+	// Check if we have TLS to Kafka
+	if configuration.certFile != "" || configuration.keyFile != "" || configuration.caFile != "" {
+		Logger.Print("Using TLS for Kafka")
+		tlsConfig, err := kafka.SetTLSConfigParameters(configuration.certFile, configuration.keyFile, configuration.caFile)
+		if err != nil {
+			Logger.Panicf("Error setting TLS config parameters: %v", err)
+		}
+		conf.Net.TLS.Enable = true
+		conf.Net.TLS.Config = tlsConfig
+	}
+	conf.Producer.RequiredAcks = sarama.WaitForLocal
+	conf.Producer.Return.Successes = true
+	conf.ClientID = config.clientID
+	producer, err := sarama.NewAsyncProducer(strings.Split(config.bootstrapServers, ","), conf)
+	if err != nil {
+		Logger.Panicf("Error creating producer: %v\n", err)
+	}
+	go func() {
+		for err := range producer.Errors() {
+			Logger.Println("Failed to send message:", err)
+		}
+	}()
+	go func() {
+		for msg := range producer.Successes() {
+			if config.verbose {
+				Logger.Println("Message sent:", msg)
+			}
+		}
+	}()
+	Logger.Printf("Connected to Kafka. Creating startup message...\n")
+	config.producer = producer
+	kafka.SetProducer(producer)
+	// Start a new goroutine for sending kafka messages
+	kafka.StartBackgroundThread()
+}
+
+func main() {
+	Logger.Printf("Downstream version: %s starting up...", version.GitVersion)
+
+	var fileName string
+	if len(os.Args) == 2 {
+		fileName = os.Args[1]
+	}
+
+	hup := make(chan os.Signal, 1)
+	sigterm := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	signal.Notify(sigterm, os.Interrupt, syscall.SIGTERM)
+
+	var udpStopChan chan struct{}
+	var udpDoneChan chan struct{}
+
+	udpStarted := false
+	reloadFunc := func() {
+		Logger.Println("Reading configuration...")
+		configuration := defaultConfiguration()
+		configuration, err := readParameters(fileName, configuration)
+		if err != nil {
+			Logger.Fatalf("Error reading configuration file %s: %v\n", fileName, err)
+		}
+		// Pick up environment variable overrides after reading config file
+		configuration = overrideConfiguration(configuration)
+		config = configuration
+		checkConfiguration(config)
+		if config.logFileName != "" {
+			Logger.Println("Setting up log to file: " + config.logFileName)
+			err := logfile.SetLogFile(config.logFileName, Logger)
+			if err != nil {
+				Logger.Fatal(err)
+			}
+			Logger.Println("Log to file started up")
+			kafka.SetLogger(Logger)
+			udp.SetLogger(Logger)
+		}
+		logConfiguration(configuration)
+		address := fmt.Sprintf("%s:%d", config.targetIP, config.targetPort)
+		if config.mtu == 0 {
+			mtuValue, err := mtu.GetMTU(config.nic, address)
+			if err != nil {
+				Logger.Fatal(err)
+			}
+			config.mtu = uint16(mtuValue)
+		}
+		Logger.Printf("MTU set to: %d\n", config.mtu)
+		Logger.Printf("Loading private keys from files: %s\n", config.privateKeyGlob)
+		readPrivateKeys(config.privateKeyGlob)
+		// Stop previous UDP server if running
+		if udpStopChan != nil {
+			close(udpStopChan)
+			<-udpDoneChan
+		}
+		// Stop Kafka background thread before closing/recreating producer
+		kafka.StopBackgroundThread()
+		if config.producer != nil {
+			config.producer.AsyncClose()
+			config.producer = nil
+		}
+		connectToKafka(config)
+		kafka.StartBackgroundThread()
+		udpStopChan = make(chan struct{})
+		udpDoneChan = make(chan struct{})
+		Logger.Printf("Checking UDP port availability on %s:%d...\n", config.targetIP, config.targetPort)
+		maxRetries := 5
+		for i := 0; i < maxRetries; i++ {
+			addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", config.targetIP, config.targetPort))
+			if err != nil {
+				Logger.Printf("Failed to resolve UDP address: %v", err)
+				time.Sleep(200 * time.Millisecond)
+				continue
+			}
+			testConn, err := net.ListenUDP("udp", addr)
+			if err == nil {
+				testConn.Close()
+				udpStarted = true
+				break
+			}
+			Logger.Printf("UDP port %d not available (attempt %d/%d), retrying in 200ms...", config.targetPort, i+1, maxRetries)
+			time.Sleep(200 * time.Millisecond)
+			if i == maxRetries-1 {
+				Logger.Printf("UDP port %d still not available after retries, giving up.", config.targetPort)
+				udpStarted = false
+				return
+			}
+		}
+		if udpStarted {
+			Logger.Printf("Starting UDP Server on %s:%d\n", config.targetIP, config.targetPort)
+			// Connect to Kafka and start background thread
+			connectToKafka(config)
+			kafka.StartBackgroundThread()
+			// Send to Kafka too:
+			sendMessage(protocol.TYPE_STATUS, "", config.topic, fmt.Appendf(nil, "Downstream %s starting UDP server on port %d", config.id, config.targetPort))
+			go func() {
+				udp.ListenUDPWithStop(config.targetIP, config.targetPort, handleUdpMessage, config.mtu, udpStopChan)
+				close(udpDoneChan)
+			}()
+		}
+	}
+
+	// Initial startup
+	reloadFunc()
+
+	running := true
+	for running {
+		select {
+		case <-sigterm:
+			Logger.Printf("%s: Received SIGINT/SIGTERM, exiting...", config.id)
+			sendMessage(protocol.TYPE_STATUS, "", config.topic, []byte("terminating by signal"))
+			// Stop receiving new UDP data only if UDP was started
+			if udpStarted && udpStopChan != nil {
+				close(udpStopChan)
+				<-udpDoneChan // Wait for UDP goroutine to finish
+				Logger.Printf("%s: UDP server stopped, waiting for Kafka background thread to flush...", config.id)
+			}
+			// Stop Kafka background thread and flush messages
+			kafka.StopBackgroundThread()
+			if config.producer != nil {
+				config.producer.AsyncClose()
+				config.producer = nil
+			}
+			Logger.Printf("%s: Downstream process exited.", config.id)
+			running = false
+		case <-hup:
+			Logger.Printf("SIGHUP received: reopening log file for logrotate...")
+			if config.logFileName != "" {
+				err := logfile.SetLogFile(config.logFileName, Logger)
+				if err != nil {
+					Logger.Printf("Error reopening log file: %v", err)
+				} else {
+					Logger.Printf("Log file reopened: %s", config.logFileName)
+				}
+			}
+			// Do NOT reload config or restart UDP server
+		}
+	}
+	Logger.Printf("%s Downstream exiting\n", config.id)
+}
+
+// The current configuration
+func logConfiguration(config TransferConfiguration) {
+	Logger.Printf("Configuration:")
+	Logger.Printf("  id: %s", config.id)
+	Logger.Printf("  nic: %s", config.nic)
+	Logger.Printf("  targetIP: %s", config.targetIP)
+	Logger.Printf("  targetPort: %d", config.targetPort)
+	Logger.Printf("  bootstrapServers: %s", config.bootstrapServers)
+	Logger.Printf("  topic: %s", config.topic)
+	Logger.Printf("  mtu: %d", config.mtu)
+	Logger.Printf("  from: %s", config.from)
+	Logger.Printf("  privateKeyGlob: %s", config.privateKeyGlob)
+	Logger.Printf("  target: %s", config.target)
+	Logger.Printf("  verbose: %t", config.verbose)
+	Logger.Printf("  logFileName: %s", config.logFileName)
+	Logger.Printf("  certFile: %s", config.certFile)
+	Logger.Printf("  keyFile: %s", config.keyFile)
+	Logger.Printf("  caFile: %s", config.caFile)
+}
+
+// Check the configuration. On fail, will terminate the application
+func checkConfiguration(result TransferConfiguration) {
+	Logger.Print("Validating the configuration...")
+
+	// Must have an id
+	if result.id == "" {
+		Logger.Fatal("Missing required configuration: id")
+	}
+	if result.nic == "" {
+		Logger.Fatal("Missing required configuration: nic")
+	}
+	if result.targetIP == "" {
+		Logger.Fatal("Missing required configuration: targetIP")
+	}
+	if result.targetPort < 0 || result.targetPort > 65535 {
+		Logger.Fatal("Invalid configuration: targetPort must be between 0 and 65535")
+	}
+	if result.bootstrapServers == "" {
+		Logger.Fatal("Missing required configuration: bootstrapServers")
+	}
+	if result.topic == "" {
+		Logger.Fatal("Missing required configuration: topic")
+	}
+	if result.logFileName != "" {
+		// Check that the logFileName is a valid file name
+		file, err := os.OpenFile(result.logFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			Logger.Fatalf("Cannot open log file '%s' for writing: %v", result.logFileName, err)
+		}
+		defer file.Close()
+		// Check that we can write to that file
+		if _, err := file.WriteString(""); err != nil {
+			Logger.Fatalf("Cannot write to log file '%s': %v", result.logFileName, err)
+		}
+	}
+
+	if result.target != "kafka" && result.target != "cmd" {
+		Logger.Fatalf("Unknown target '%s'. Valid targets are: 'kafka', 'cmd'", result.target)
+	}
+
+	// if one of certFile, keyFile or caFile is given, they all must be
+	if result.certFile != "" || result.keyFile != "" || result.caFile != "" {
+		if result.certFile == "" {
+			Logger.Fatalf("Missing required configuration: certFile")
+		}
+		if result.keyFile == "" {
+			Logger.Fatalf("Missing required configuration: keyFile")
+		}
+		if result.caFile == "" {
+			Logger.Fatalf("Missing required configuration: caFile")
+		}
+	}
 }
 
 // To be able to assemble fragmented events
@@ -289,19 +645,20 @@ func sendMessage(messageType uint8, id string, topic string, message []byte) {
 	}
 	if verbose {
 		Logger.Printf("id: %s", id)
-		Logger.Printf("%s Sending cleartext message to %s: %s ", config.id, config.target, string(message))
+		// Print the first 40 bytes of the message
+		Logger.Printf("%s Sending cleartext message to %s: %s to topic: %s", config.id, config.target, string(message[:40]), topic)
 	}
 	// If this is an error message, prepend a timestamp
 	var toSend []byte = message
 	if messageType == protocol.TYPE_ERROR || messageType == protocol.TYPE_STATUS {
-		toSend = []byte(fmt.Sprintf("%s %s %s", protocol.GetTimestamp(), config.id, string(message)))
+		toSend = fmt.Appendf(nil, "%s %s %s", protocol.GetTimestamp(), config.id, string(message))
 		Logger.Print(string(toSend))
 	}
 
 	// Send the data to Kafka
 	if config.target == "kafka" {
 		// Send the result to Kafka
-		kafka.WriteToKafka(messageKey, config.topic, toSend)
+		kafka.WriteToKafka(messageKey, topic, toSend)
 	} else {
 		// send to stdout
 		os.Stdout.Write(toSend)
@@ -311,10 +668,15 @@ func sendMessage(messageType uint8, id string, topic string, message []byte) {
 
 // This is called for every message read from UDP
 func handleUdpMessage(receivedBytes []byte) {
+	if config.verbose {
+		Logger.Printf("Received %d bytes from UDP\n", len(receivedBytes))
+	}
 	// Try our format
 	var messageType uint8
 	messageType, messageId, payload, ok := protocol.ParseMessage(receivedBytes, cache)
-	fmt.Printf("MessageType %d, messageId %s\n", messageType, messageId)
+	if config.verbose {
+		Logger.Printf("MessageType %d, messageId %s\n", messageType, messageId)
+	}
 	nrErrorMessages := 0
 	errorMessageLastTime := time.Now()
 	errorMessageEvery := 60 * time.Second
@@ -322,49 +684,49 @@ func handleUdpMessage(receivedBytes []byte) {
 		// Error
 		Logger.Fatalf("Error parsing message %s, %v\n", receivedBytes, ok)
 	} else {
-		if messageType == protocol.TYPE_KEY_EXCHANGE {
+		switch messageType {
+		case protocol.TYPE_KEY_EXCHANGE:
 			// Get the new key from the message
 			keyFileNameUsed := readNewKey(payload)
 			// and send a key-change log event to Kafka
-			message := []byte(fmt.Sprintf("Updating symmetric key with private key file: %s", keyFileNameUsed))
+			message := fmt.Appendf(nil, "Updating symmetric key with private key file: %s", keyFileNameUsed)
 			Logger.Print(string(message))
 			sendMessage(protocol.TYPE_STATUS, "", config.topic, message)
-		} else if messageType == protocol.TYPE_CLEARTEXT {
+		case protocol.TYPE_CLEARTEXT:
 			// Cleartext message
 			sendMessage(protocol.TYPE_MESSAGE, messageId, config.topic, payload)
-		} else if messageType == protocol.TYPE_MESSAGE {
+		case protocol.TYPE_MESSAGE:
 			// Encrypted message. Decrypt
 			decrypted, err := protocol.Decrypt(payload, config.key)
 			if err != nil {
 				// Error decrypting message. Always send the error message to Kafka
-				message := []byte(fmt.Sprintf("ERROR decrypting message: %s", err))
+				message := fmt.Appendf(nil, "ERROR decrypting message: %s", err)
 				sendMessage(protocol.TYPE_ERROR, messageId, config.topic, message)
 			} else {
 				// Decrypted message ok
 				sendMessage(protocol.TYPE_MESSAGE, messageId, config.topic, decrypted)
 			}
-		} else if messageType == protocol.TYPE_ERROR {
+		case protocol.TYPE_ERROR:
 			if nrErrorMessages == 0 {
 				// Always send first time an error occurs
-				message := []byte(fmt.Sprintf("ERROR message received: %s", payload))
+				message := fmt.Appendf(nil, "ERROR message received: %s", payload)
 				sendMessage(protocol.TYPE_ERROR, messageId, config.topic, message)
 				nrErrorMessages += 1
 			} else {
 				if time.Now().After(errorMessageLastTime.Add(errorMessageEvery)) {
 					// Send error messages periodically
-					message := []byte(fmt.Sprintf("ERROR messages received: %d, last received: %s",
+					message := fmt.Appendf(nil, "ERROR messages received: %d, last received: %s",
 						nrErrorMessages,
-						payload))
+						payload)
 					sendMessage(protocol.TYPE_ERROR, messageId, config.topic, message)
-					errorMessageLastTime = time.Now()
-					nrErrorMessages = 0 // reset the message counter
-				} else {
-					nrErrorMessages += 1
 				}
 			}
-		} else if messageType == protocol.TYPE_MULTIPART {
+		case protocol.TYPE_MULTIPART:
+			if config.verbose {
+				Logger.Printf("Waiting for last fragment of multipart message. id: %s", messageId)
+			}
 			// Do nothing. Wait for the last fragment
-		} else {
+		default:
 			// Just send the text to Kafka with an empty ID (will create a new ID)
 			sendMessage(protocol.TYPE_MESSAGE, "", config.topic, payload)
 		}
@@ -404,106 +766,4 @@ func readNewKey(message []byte) string {
 	}
 	sendMessage(protocol.TYPE_ERROR, "", config.topic, []byte(fmt.Sprintf("Can't decrypt the new symmetric key. Tried all %v private keys\n", len(config.keyInfos))))
 	return "ERROR: No key found that can decrypt the new symmetric key"
-}
-
-// main is the entry point of the program.
-// It reads a configuration file from the command line parameter,
-// initializes the necessary variables, and starts the upstream process.
-func main() {
-	if len(os.Args) < 2 {
-		Logger.Fatal("Missing command line parameter (configuration file)\n")
-	}
-	fileName := os.Args[1]
-
-	configuration, err := readParameters(fileName)
-	if err != nil {
-		Logger.Fatalf("Error reading configuration file %s: %v\n", fileName, err)
-	}
-	// Add to package variable
-	config = configuration
-
-	// Set the log file name
-	if config.logFileName != "" {
-		err := logfile.SetLogFile(config.logFileName, Logger)
-		if err != nil {
-			Logger.Fatal(err)
-		}
-		Logger.Println("Log to file started up")
-		kafka.SetLogger(Logger)
-	}
-
-	// ip:port
-	address := fmt.Sprintf("%s:%d", config.targetIP, config.targetPort)
-
-	// The GetMTU will open the connection with UDP on the specified NIC
-	// and be able to read the MTU for that connection. We need the MTU to
-	// be able to read the correct amount of bytes from the UDP connection
-
-	if config.mtu == 0 {
-		mtuValue, err := mtu.GetMTU(config.nic, address)
-		if err != nil {
-			Logger.Fatal(err)
-		}
-		config.mtu = uint16(mtuValue)
-	}
-	Logger.Printf("MTU set to: %d\n", config.mtu)
-
-	// Load our private key
-	Logger.Printf("Loading private keys from files: %s\n", config.privateKeyGlob)
-	readPrivateKeys(config.privateKeyGlob)
-
-	// Create a new async producer
-	if config.target == "kafka" {
-		Logger.Printf("Connecting to %s\n", config.bootstrapServers)
-		conf := sarama.NewConfig()
-		conf.Producer.RequiredAcks = sarama.WaitForLocal
-		conf.Producer.Return.Successes = true
-		conf.ClientID = config.clientID
-		producer, err := sarama.NewAsyncProducer(strings.Split(config.bootstrapServers, ","), conf)
-		if err != nil {
-			Logger.Panicf("Error creating producer: %v\n", err)
-		}
-		defer func() {
-			if err := producer.Close(); err != nil {
-				Logger.Panicf("Error closing async producer: %v", err)
-			}
-		}()
-		go func() {
-			for err := range producer.Errors() {
-				Logger.Println("Failed to send message:", err)
-			}
-		}()
-		go func() {
-			for msg := range producer.Successes() {
-				if config.verbose {
-					Logger.Println("Message sent:", msg)
-				}
-			}
-		}()
-		Logger.Printf("Connected to Kafka. Creating startup message...\n")
-		config.producer = producer
-		kafka.SetProducer(producer)
-		// Start a new goroutine for sending kafka messages
-		kafka.StartBackgroundThread()
-	}
-
-	// Send startup message with unique key
-	sendMessage(protocol.TYPE_STATUS, "", config.topic, []byte("downstream starting up"))
-
-	// Signal termination
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-c
-		// Send shutdown message to Kafka
-		Logger.Printf("%s Sending shutdown message to Kafka\n", config.id)
-		sendMessage(protocol.TYPE_STATUS, "", config.topic, []byte("terminating by signal"))
-		time.Sleep(500 * time.Millisecond) // Give the Kafka message some time to be processed before terminating
-		os.Exit(1)
-	}()
-
-	Logger.Printf("Starting UDP Server on %s:%d\n", config.targetIP, config.targetPort)
-	// Now, read from UDP and call our handler for each message:
-	udp.ListenUDP(config.targetIP, config.targetPort, handleUdpMessage, config.mtu)
-
 }

@@ -16,38 +16,41 @@ func GetTimestamp() string {
 func NrMessages(mtu uint16, id string, message []byte) uint16 {
 	// Header is
 	// uint8 1 byte MessageType
-	// uint16 2 bytes MessageNumber 
+	// uint16 2 bytes MessageNumber
 	// uint16 2 bytes NrMessages
 	// uint16 2 bytes Length of ID
 	// ? bytes id
 	// 4 bytes checksum
 	// 2 bytes length of payload
 	// payload ([] byte)
-	var payloadLength = mtu - 13 - uint16(len(id));
+	var payloadLength = mtu - 13 - uint16(len(id))
 	// len in Go returns the number of bytes, not the number of characters or runes.
-	var nrMsgs = 1 + uint16(len(message)) / payloadLength;
-	return nrMsgs;
+	var nrMsgs = 1 + int32(len(message))/int32(payloadLength)
+	if nrMsgs != int32(uint16(nrMsgs)) {
+		// This message will not be delivered.
+		log.Printf("This message will not be delivered. Max 65535 messages are allowed for each message.")
+	}
+	return (uint16)(nrMsgs)
 }
-
 
 /**
 * Make a MD5 hash of the message and return the last 4 characters
-*/
+ */
 func CalculateChecksum(message []byte) string {
-    hasher := md5.New()
-    hasher.Write(message)
-    hash := hex.EncodeToString(hasher.Sum(nil))
+	hasher := md5.New()
+	hasher.Write(message)
+	hash := hex.EncodeToString(hasher.Sum(nil))
 
-    if len(hash) > 4 {
-        return hash[len(hash)-4:]
-    }
-    return hash
+	if len(hash) > 4 {
+		return hash[len(hash)-4:]
+	}
+	return hash
 }
 
 /**
 	// Header is
 	// uint8 1 byte MessageType
-	// uint16 2 bytes MessageNumber 
+	// uint16 2 bytes MessageNumber
 	// uint16 2 bytes NrMessages
 	// uint16 2 bytes Length of ID
 	// ? bytes id
@@ -59,17 +62,20 @@ func CalculateChecksum(message []byte) string {
 
 // Return a message in the format that can be sent over the network
 func FormatMessage(messageType uint8, id string, message []byte, mtu uint16) [][]byte {
-    var result [][]byte
-	payloadLength := uint16(len(message))
+	var result [][]byte
+	// log.Printf("message length: %d", len(message))
+	payloadLength := int32(len(message))
 
 	// This call will calculate the correct number of messages
 	nrMsgs := NrMessages(mtu, id, message)
+	// log.Printf("Message length: %d, MTU: %d\n", payloadLength, mtu)
+	// log.Printf("Message will be sent in %d parts\n", nrMsgs)
 	// Now we know the exact number of messages we need to transmit
 
 	// Start with the first message
 	var messageNumber uint16 = 1
-	var position uint16 = 0
-	for (position < payloadLength) {
+	var position int32 = 0
+	for position < payloadLength {
 		part := []byte{}
 		// Create a byte slice with enough space to hold a uint8
 		b := make([]byte, 1)
@@ -99,7 +105,7 @@ func FormatMessage(messageType uint8, id string, message []byte, mtu uint16) [][
 		// Calculate the remaining length for the payload
 		// Header is
 		// uint8 1 byte MessageType
-		// uint16 2 bytes MessageNumber 
+		// uint16 2 bytes MessageNumber
 		// uint16 2 bytes NrMessages
 		// uint16 2 bytes Length of ID
 		// ? bytes id
@@ -113,7 +119,7 @@ func FormatMessage(messageType uint8, id string, message []byte, mtu uint16) [][
 		}
 		var payload []byte = []byte{}
 		var checksum string
-		if int32(payloadLength)-int32(position) <= remainingLength {
+		if payloadLength-position <= remainingLength {
 			// The rest of the message fits in this window
 			// Calculate the payload
 			payload = message[position:]
@@ -130,8 +136,8 @@ func FormatMessage(messageType uint8, id string, message []byte, mtu uint16) [][
 			// Add the message to the result
 			result = append(result, part)
 		} else {
-			// Take a slice of the message 
-			payload = message[position : position+uint16(remainingLength)]
+			// Take a slice of the message
+			payload = message[position : position+int32(remainingLength)]
 			checksum = CalculateChecksum(payload)
 			// Convert the checksum to a byte slice
 			checksumBytes := []byte(checksum)
@@ -145,9 +151,9 @@ func FormatMessage(messageType uint8, id string, message []byte, mtu uint16) [][
 			// Add the message to the result
 			result = append(result, part)
 		}
-		position += uint16(remainingLength)
+		position += int32(remainingLength)
 		messageNumber++
 	}
-
-    return result
+	// log.Printf("Formatted message into %d parts\n", len(result))
+	return result
 }

@@ -8,11 +8,16 @@ src/version/version.go:
 	git fetch --tags
 	@echo 'package version\n\nvar GitVersion = "$(GIT_VERSION)"' > src/version/version.go
 
+
 upstream: src/version/version.go src/upstream/upstream.go
-	cd src/upstream && go build -o upstream upstream.go
+	mkdir -p ./target
+	go build -o ./target/upstream src/upstream/upstream.go
+
 
 downstream: src/version/version.go src/downstream/downstream.go
-	cd src/downstream && go build -o downstream downstream.go
+	mkdir -p ./target
+	go build -o ./target/downstream src/downstream/downstream.go
+
 
 clean:
-	rm -f src/upstream/upstream src/downstream/downstream src/version/version.go
+	rm -f ./target/upstream ./target/downstream src/version/version.go
