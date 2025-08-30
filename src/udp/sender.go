@@ -1,8 +1,10 @@
 package udp
 
 import (
+	"fmt"
 	"log"
 	"net"
+	"strings"
 	// Send a UDP message
 )
 
@@ -35,6 +37,16 @@ func (u *UDPConn) SendMessage(message []byte) error {
 	}
 	// log.Printf("Sending %d bytes to %s\n", len(message), u.conn.RemoteAddr().String())
 	_, err := u.conn.Write(message)
+	if err != nil {
+		if opErr, ok := err.(*net.OpError); ok && opErr.Err != nil {
+			if strings.Contains(opErr.Err.Error(), "connection refused") {
+				return fmt.Errorf("udp-connection-refused: %w", err)
+			}
+		}
+		if err == net.ErrClosed {
+			return fmt.Errorf("udp-connection-closed: %w", err)
+		}
+	}
 	return err
 }
 
@@ -49,6 +61,14 @@ func (u *UDPConn) SendMessages(messages [][]byte) error {
 		_, err := u.conn.Write(message)
 		if err != nil {
 			log.Printf("Error sending message part %d: %v\n", i+1, err)
+			if opErr, ok := err.(*net.OpError); ok && opErr.Err != nil {
+				if strings.Contains(opErr.Err.Error(), "connection refused") {
+					return fmt.Errorf("udp-connection-refused: %w", err)
+				}
+			}
+			if err == net.ErrClosed {
+				return fmt.Errorf("udp-connection-closed: %w", err)
+			}
 			return err
 		}
 	}

@@ -645,8 +645,12 @@ func sendMessage(messageType uint8, id string, topic string, message []byte) {
 	}
 	if verbose {
 		Logger.Printf("id: %s", id)
-		// Print the first 40 bytes of the message
-		Logger.Printf("%s Sending cleartext message to %s: %s to topic: %s", config.id, config.target, string(message[:40]), topic)
+		// Print at most 40 characters of the message
+		msgStr := string(message)
+		if len(msgStr) > 40 {
+			msgStr = msgStr[:40]
+		}
+		Logger.Printf("%s Sending cleartext message to %s: %s to topic: %s", config.id, config.target, msgStr, topic)
 	}
 	// If this is an error message, prepend a timestamp
 	var toSend []byte = message

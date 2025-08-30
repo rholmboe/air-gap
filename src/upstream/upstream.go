@@ -630,7 +630,23 @@ func main() {
 		if len(messages) == 1 {
 			udpErr := conn.SendMessage(messages[0])
 			if udpErr != nil {
-				Logger.Fatalf("Error: %v", udpErr)
+				if strings.Contains(udpErr.Error(), "udp-connection-refused") || strings.Contains(udpErr.Error(), "udp-connection-closed") {
+					Logger.Printf("UDP connection error detected, attempting to recreate connection: %v", udpErr)
+					conn.Close()
+					conn, err = udp.NewUDPConn(address)
+					if err != nil {
+						Logger.Fatalf("Error recreating UDP connection: %v", err)
+					} else {
+						Logger.Printf("UDP connection recreated successfully.")
+						// Try sending again
+						udpErr = conn.SendMessage(messages[0])
+						if udpErr != nil {
+							Logger.Fatalf("Error after UDP reconnect: %v", udpErr)
+						}
+					}
+				} else {
+					Logger.Fatalf("Error: %v", udpErr)
+				}
 			}
 		}
 
@@ -653,7 +669,7 @@ func main() {
 		// Closure for Kafka message handler, captures conn
 		kafkaHandler := func(id string, key []byte, t time.Time, received []byte) bool {
 			var messages [][]byte
-			Logger.Println("handleKafkaMessage called with message byte array length: ", len(received))
+			// Logger.Println("handleKafkaMessage called with message byte array length: ", len(received))
 			var err error
 			if config.encryption {
 				var ciphertext []byte
@@ -668,7 +684,26 @@ func main() {
 			if err != nil {
 				Logger.Println(err)
 			}
-			conn.SendMessages(messages)
+			udpErr := conn.SendMessages(messages)
+			if udpErr != nil {
+				if strings.Contains(udpErr.Error(), "udp-connection-refused") || strings.Contains(udpErr.Error(), "udp-connection-closed") {
+					Logger.Printf("UDP connection error detected in Kafka handler, attempting to recreate connection: %v", udpErr)
+					conn.Close()
+					conn, err = udp.NewUDPConn(fmt.Sprintf("%s:%d", config.targetIP, config.targetPort))
+					if err != nil {
+						Logger.Printf("Error recreating UDP connection: %v", err)
+					} else {
+						Logger.Printf("UDP connection recreated successfully in Kafka handler.")
+						// Try sending again
+						udpErr = conn.SendMessages(messages)
+						if udpErr != nil {
+							Logger.Printf("Error after UDP reconnect in Kafka handler: %v", udpErr)
+						}
+					}
+				} else {
+					Logger.Printf("Error sending UDP messages: %v", udpErr)
+				}
+			}
 			if config.encryption && config.generateNewSymmetricKeyEvery > 0 {
 				if time.Now().After(nextKeyGeneration) {
 					if config.publicKeyFile != "" {
