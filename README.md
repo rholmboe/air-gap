@@ -296,7 +296,6 @@ See LICENSE file
 # Release Notes
 
 ## 0.1.2-SNAPSHOT
-### Environment variable override
 * All configuration from files can be overridden by environment variables. See Configuration Upstream
 * UDP sending have been made more robust
 * Transfer of binary data from upstream to downstream is now supported
