@@ -290,5 +290,19 @@ sudo systemctl start upstream
 ## Dependencies
 air-gap uses IBM/sarama for the Kafka read/write. For other dependencies, check the go.mod file.
 
-## Licence
-See LICENCE file
+## License
+See LICENSE file
+
+# Release Notes
+
+## 0.1.2-SNAPSHOT
+### Environment variable override
+* All configuration from files can be overridden by environment variables. See Configuration Upstream
+* UDP sending have been made more robust
+* Transfer of binary data from upstream to downstream is now supported
+* Sending a sighup to upstream or downstream will now force a re-write of the log file, so you can rotate the log file and then sighup the application to make it log to a new file with the name specified in the upstream or downstream configuration.
+* air-gap now supports TLS and mTLS to Kafka upstream and downstream. 
+
+## 0.1.1-SNAPSHOT
+### Several sending threads
+air-gap now supports several sending threads that all have a specified time offset, so you can start one thread that consumes everything from Kafka as soon as it's available, one that inspects Kafka content that was added for an hour ago and so on. See Automatic resend above.
