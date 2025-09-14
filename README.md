@@ -1,9 +1,40 @@
-## air-gap Kafka to Kafka Topic Transfer over UDP with Guaranteed Delivery
+# air-gap Kafka to Kafka Topic Transfer over UDP with Guaranteed Delivery
 This project aims to solve the problem of transferring events from a Kafka topic in near real time over an unsecure UDP connection with guaranteed once-only delivery of the events. This can be useful, e.g., for transmitting log events over a hardware diode. The information leaving the sending side may be encrypted with symmetric keys and the key exchange is automatic with use of public key encryption. 
 
 In Kafka, events may have a key and a value. The key part of events upstreams will be lost in the transmission, since the key part downstream is used for message identification and thus detection of lost messages (gap-detection). 
 
-For resend of lost events that gap-detection identifies, a back channel must be present but can be a manual routine with input from keyboard or from a file transfer. The information is mainly what topic, partition and id to start reading from. When that information is present upstream, you need to run one application that configures upstream to read from a new timestamp (set-timestamp) and then restart upstream to read from the new timestamp. 
+For resend of lost events that gap-detection identifies, a back channel must be present but can be a manual routine with input from keyboard or from a file transfer. The information is mainly what topic, partition and id to start reading from. The easiest way to do that is to use the create-resend-bundle application that reads the Kafka Gap topic and creates a file with the missing events. The file needs to be copied to upstream and then used with the resend-missing application that reads the missing events and transmits them again to the UDP receiver.
+
+## Quick Start
+
+1. **Clone and build:**
+	```bash
+	git clone <your-repo-url>
+	cd air-gap
+	make
+	```
+
+2. **Run a local test (no Kafka required):**
+	- Edit `config/upstream3.properties` and `config/downstream3.properties` as needed (set `targetIP` to your local IP).
+	- In one terminal:
+	  ```bash
+	  go run src/downstream/downstream.go config/downstream3.properties
+	  ```
+	- In another terminal:
+	  ```bash
+	  go run src/upstream/upstream.go config/upstream3.properties
+	  ```
+	- You should see messages sent and received.
+
+3. **Next steps:**
+	- Connect to real Kafka by editing the config files.
+	- Enable encryption by setting `publicKeyFile` and related fields.
+	- See the rest of this README and [Deduplication.md](doc/Deduplication.md) for advanced usage, gap detection, and production deployment.
+    - More help for setting up encryption to Kafka can be found here: [Kafka-encryption.md](doc/Kafka-encryption.md)
+    - See [Monitoring.md](doc/Monitoring.md) on how to monitor the applications for resource usage etc.
+    - To set up reduncancy and/or load balancing, see [Redundancy and Load Balancing.md](doc/Redundancy%20and%20Load%20Balancing.md)
+
+
 
 ## Notation
 There are four executable files that together constitutes the transfer software.
@@ -14,22 +45,13 @@ There are four executable files that together constitutes the transfer software.
 
 To use guaranteed delivery, you must be able to copy information from the gap-detector that runs downstream to the set-timestamp program that runs upstream. The information that needs to traverse the diode in the wrong direction is basically a topic id, partition id and position for the first lost event. set-timestamp is an application that uses that information, queries Kafka upstream on the last timestamp before that event and configures the upstream application to start reading at that timestamp.
 
-```
-                 Manually bridge the air-gap with topic_partition_position information
-Kafka Upstream   <----------------------------------------------+
-    ^                                                           |
-    upstream.go > (UDP) > downstream.go > Kafka Downstream > Gap report
-                                            v       ^
-                                           gap-detector
-                                               v
-                                        File: gap state 
-                                    
-```
+![air-gap flow](doc/img/air-gap%20flow.png)
 N.B., neither the configuration files nor the key files are not shown in the above image.
 
 upstream reads from a Kafka topic specified in the upstream configuration file. It then enrypts the data and sends it over the UDP connection, that might include a hardware diode. Packets that are more than MTU in size (with header) will get fragmented and sent as several UDP packets. Downstream listens to UDP packets, performs defragmentation and decryption of the content and writes to a Kafka instance and topic specified in the downstream configuration file.
 
-Downstream Kafka contains two topics: one that downstream.go writes to and one that gap-detector.go writes to. The first may contain duplicates but the one from gap-detector should very rarely contain duplicates. Consume the gap-detector output topic, and send to your SIEM of choice. The data sent from Kafka upstream to Kafka downstream is treated as bytes and not strings, so any string encoding in upstream should be present in the final Kafka topic. It should be able to correctly send files and images to the downstream Kafka but that is still to be tested. 
+Downstream Kafka contains three topics: one that downstream.go writes to, that is read by the deduplicator and saved as a deduplicated stream of events. Any missing events are identified by the key they should have by the gap-detector and those gaps are reported to the third Kafka topic downstream.
+The first topic may contain duplicates but the one from the deduplicator should very rarely contain duplicates. Consume the gap-detector output topic, and send to your SIEM of choice. The data sent from Kafka upstream to Kafka downstream is treated as bytes and not strings, so any string encoding in upstream should be present in the final Kafka topic. Binary data, like files and images are also acceptable payloads to the downstream Kafka.
 
 ## Getting started
 ### Very simple use case
@@ -54,15 +76,15 @@ A few messages should now be sent from upstream and received by downstream. From
 ### Upstream
 Upstream has two main purposes, to read events from the upstream Kafka, and to send the events to the UDP receiver. Since the UDP transmission may be insecure, we may encrypt the events using symmetric AES256 in GCM mode. The key is generated on startup, and at configurable intervals. The key is also sent over the UDP transmission to the receiver, encrypted with the receiver's public key, that we store in a file upstream. To change the public key, it should suffice to add a new key and change the configuration file to point to the new key. When the next key generation is set, the new key will be used instead of the old.
 
-The encryption is only enabled if the `publicKeyFile` is et to the downstream public certificate pem file.
+The encryption is only enabled if the `encrypted` property is set to true and the `publicKeyFile` is set to the downstream public certificate pem file.
 
 ### Downstream
-Downstrem should receive UDP data (encrypted and unencrypted) and write events to the downstream Kafka on a configured topic. When upstream starts, cleartext events will be generated, as well as an encrypted key. The cleartext messages should be forwarded to the downstream Kafka, key exchange messages should be handled internally and encrypted messages should be decrypted and then forwarded to the downstream Kafka.
+Downstrem should receive UDP data (encrypted and unencrypted) and write events to the downstream Kafka on a configured topic. When upstream starts, cleartext events will be generated, as well as an encrypted key (if encryption is enabled). The cleartext messages should be forwarded to the downstream Kafka, key exchange messages should be handled internally and encrypted messages should be decrypted and then forwarded to the downstream Kafka.
 
 On downstream startup, a file glob is read from the configuration file. When a key exchange message is received, the file glob is used to load all private key files that matches the glob. The encrypted message is decrypted with all the private keys until one succeeds. To know if an encryption was successful or not, the symmetric key that upstream sends is prepended with a known string before encryption, a so called guard. When the decrypted message starts with the guard, the rest is used as the new symmetric key. Downstream writes the events to the downstream Kafka with the upstream Kafka topic name, partition id and position as the downstream key. The name of the downstream Kafka topic downstream writes to is configurable. That topic is then consumed by gap-detection.
 
 #### Performance
-UDP receive is normally faster than Kafka writes. The downstream application tries to safeguard against lost packets by using a lightweight thread that receives events, decrypts them using AES256 (quite fast) and then adds the events to an array. Another thread consumes the array and writes to Kafka using the async protocol (that also returns immediately and processes the write in another thread). If the performance is not enough, first try to add nodes to the Kafka cluster and add the nodes to the bootstrapServers configuration in the downstream process. You can also try to add several events together before writing them to the upstream Kafka, since there is some overhead for each Kafka event, especially for writing. As a last resort, the upstream sender can be set to throttle (no code for that yet), e.g., by adding a small time.Sleep after each sent event. You should be able to securely transmit tens of thousand events every second using one transmission chain, but for large installations you might have to add more sender/receiver chains, as well as upgrade the Kafka instances.
+UDP receive is normally faster than Kafka writes. The downstream application tries to safeguard against lost packets by using a lightweight thread that receives events, decrypts them using AES256 (quite fast) and then adds the events to an array. Another thread consumes the array and writes to Kafka using the async protocol (that also returns immediately and processes the write in yet another thread). If the performance is not enough, first try to add nodes to the Kafka cluster and add the nodes to the bootstrapServers configuration in the downstream process. You can also try to add several events together before writing them to the upstream Kafka, since there is some overhead for each Kafka event, especially for writing. As a last resort, the upstream sender can be set to throttle (no code for that yet), e.g., by adding a small time.Sleep after each sent event. You should be able to securely transmit tens of thousand events every second using one transmission chain, but for large installations you might have to add more sender/receiver chains, as well as upgrade the Kafka instances.
 
 ### Automatic resend
 Since UDP is an unreliable protocol, you can set up air-gap to automatically resend logs at specific time intervals. In the upstream property file, add the following property:
@@ -81,31 +103,12 @@ When a thread reads a message in Kafka, it will check if the Kafka timestamp - t
 
 If a message is read but not delivered (because the thread is sleeping) and the application terminates, then the
 
-### Gap Detection
-Since UDP diodes only allow traffic in one direction, we need to invent a new feedback loop in case any events are not successfully delivered over the connection. We do this by enumerating all events we get from the upstream Kafka, send them over the UDP connection and use the enumeration as a key for the events in the downstream Kafka.
-
-Now, the gap-detector will process each event in the downstream Kafka that the downstream UDP receiver wrote to, using the provided key from the upstream Kafka. Let's denote the events {key, info}. The key will be the concatenation of the upstream Kafka Topic name, an underscore _, the upstream Kafka partition id, another underscore _ and lastly the position of the event in that partition. This also means we will not be able to transmit the upstrema Kafka key to the downstream Kafka. The gap-detector will now store positions for all received partitions along with a list of gaps, that are from-to positions that we miss in a specific partition. All processed events from the gap-detector will be written to another topic in the downstream Kafka. The new topic will have no duplicates.
-
-Regulary, the gap-detector will find the smallest position for each partition and emit an event that contains topicName_partitionId_position for each of those positions, e.g., topicname_0_34 topicname_1_42343543534 topicname_2_2435234. That list can be used in set-timestamp to instruct the upstream process to start at a new position. Also, this list will be sent on Ctrl-C or os signal shutdown.
-
-If the gap-detection fails, we can still use LogGenerator to search for missing events in an index in Elasticsearch, but this method takes more processing power than gap-detector.
-
-gap-detector loads the state (current gaps) from file on start and saves the state to the same file each time the sendGapsEverySeconds is triggered. It also saves the state when a terminating signal is detected.
-
-#### Possible duplicates and missing events
-If the gap-detector crashes or otherwise is brought down non-gracefully (out of disk etc), the unsaved data since last save will not be persisted. Next time the gap-detector is started, the Kafka position (which is stored in Kafka) will proceed on the next event but the state was saved earlier in the event history, so events between last gap save and the next startup will be delivered again to the output topic by gap-detector. There's also a chance that events are processed in memory during a crash and will not be delivered to the output topic by gap-detector. To counter this, there is the possibility to use Kafka transactions, so gap-detector reads one event from the input topic with a Kafka transaction and doesn't mark the event as handled until it gets a transaction message from the Kafka output topic saying the event was successfully persisted. 
-
-Transactions will lower the performance of gap-detector, possibly by a substantial value. A middle way is to use the last saved gap state timestamp as a from parameter in gap-detector.
-Every time the gap state is saved to disk, the gap-detector configuration file from parameter is updated to the timestamp of the last read event i Kafka. When the gap-detector restarts it will start to read from Kafta at the time from the configuration. Since the configuration now is in sync with the state, no events should be missed. All events that were delivered after the last sync (before the crash) will be deivered again, so here we won't avoid duplicates.
-
-If it's essential to avoid duplicates, there are schemes for setting the primary key for events in, e.g., Elasticsearch. The process reading from the gap-detector output topic and use the key from the event as the primary key in Elasticsearch. This will totally avoid duplicates.
-
-The configuration file and the gap state should be considered for backup, since the application might crash in the middle of writing the files.
+### Deduplication and Gap Detection
+This is covered in the [Deduplication.md](doc/Deduplication.md) documentation
 
 ### Using Gap Detection Events to Resend from Upstream
-set-timestamp takes a configuration file and a list of, at least one, topicName_partitionId_position as arguments. For each topicName_partitionId_position it checks the upstream Kafka for the receive time of that specific events. When all events are processed, the earliest timestamp found is written to the from parameter in the supplied configuration file.
+TBD
 
-When set-timestamp has updated the configuration file, just restart the upstream process to start reading at that point in time instead of where it was in the event stream. The configuration file will be updated so that the from value is removed. This way, Kafka will remember where upstream was in the event stream when the application is restarted the next time.
 
 ## Keys
 Generate keystore with certificate or obtain otherwise.
@@ -156,9 +159,6 @@ groupID=test
 # format for from=2024-01-28T10:24:55+01:00
 from=
 publicKeyFile=certs/server2.pem
-# random will just create a lot of random characters to test e.g. performance
-#source=random
-source=kafka
 # Every n seconds, generate a new symmetric key
 generateNewSymmetricKeyEvery=500
 # Read the MTU from the nic, or set manually
@@ -178,7 +178,34 @@ export AIRGAP_UPSTREAM_NIC=ens0
 export AIRGAP_UPSTREAM_TARGET_IP=255.255.255.255
 ...
 ```
- 
+
+### All settings for upstream
+| Config file property name | Environment variable name | Default value | Description |
+|--------------------------|--------------------------|---------------|-------------|
+| id                       | AIRGAP_UPSTREAM_ID       |               | Name of the instance. Will be used in logging and when sending status messages |
+| verbose                  | AIRGAP_UPSTREAM_VERBOSE  | false         | true gives extra logging |
+| nic                      | AIRGAP_UPSTREAM_NIC      |               | What nic to use for sending to downstream |
+| targetIP                 | AIRGAP_UPSTREAM_TARGET_IP  |               | Downstream air-gap ip address |
+| targetPort               | AIRGAP_UPSTREAM_TARGET_PORT |               | Downstream air-gap ip port |
+| bootstrapServers         | AIRGAP_UPSTREAM_BOOTSTRAP_SERVERS |               | Bootstrap url for Kafka, with port |
+| topic                    | AIRGAP_UPSTREAM_TOPIC    |               | Topic name in Kafka to read from |
+| groupID                  | AIRGAP_UPSTREAM_GROUP_ID |               | The prefix for the group to use when reading from Kafka. The complete group id will be this value, concatenated with the name from the sendingThreads. This will give each sending thread a unique group id |
+| mtu                      | AIRGAP_UPSTREAM_MTU      | 0             | 0 - ask the NIC for the MTU, else enter a positive integer |
+| from                     | AIRGAP_UPSTREAM_FROM     |               | Don't read anything from Kafka that was delivered to Kafka before this timestamp |
+| enryption                | AIRGAP_UPSTREAM_ENCRYPTION | false       | true - encrypt all payload when sending to downstream air-gap. Status messages are still in clear text to help configuration and set-up |
+| publicKeyFile            | AIRGAP_UPSTREAM_PUBLIC_KEY_FILE |               | If encryption is on, this is the public key of the receiver |
+| generateNewSymmetricKeyEvery | AIRGAP_UPSTREAM_GENERATE_NEW_SYMMETRIC_KEY_EVERY |               | How often should we change the encryption key (symmetric key)? |
+| logFileName              | AIRGAP_UPSTREAM_LOG_FILE_NAME |          | If configured, all logs will be written to this file instead of the console. This will take effekt after the configuration is read and no errors occurs |
+| sendingThreads           | AIRGAP_UPSTREAM_SENDING_THREADS | {"now": 0} | How many times, and when, whould we send each event? |
+| certFile                 | AIRGAP_UPSTREAM_CERT_FILE |               | For TLS to Kafka, add a certificate pem encoded file here |
+| keyFile                  | AIRGAP_UPSTREAM_KEY_FILE  |               | The private key for the certFile certificate |
+| caFile                   | AIRGAP_UPSTREAM_CA_FILE   |               | The CA that issued the Kafka server's certificate |
+| deliverFilter            | AIRGAP_UPSTREAM_DELIVER_FILTER |               | Filter so not all events from Kafka is sent. Can be used to enable load balancing (see Load Balancing chapter below) |
+
+### Removed settings
+| Config file property name | Environment variable name | Default value | Description |
+|--------------------------|--------------------------|---------------|-------------|
+| source                   | AIRGAP_UPSTREAM_SOURCE   |               | Source could be 'kafka' or 'random'. 'random' created dummy data instead of getting the data from Kafka. |
 
 Resend will receive a major overhaul so this section is now deprecated:
 
@@ -203,27 +230,37 @@ clientId=downstream
 
 The property privateKeyFiles should point to one or more private key files that will be tried in decrypting key exchange events from upstream.
 
-gap-detector uses it's own configuration file, where the from parameter is updated every time the gaps are saved to file.
+### All settings for downstream
+| Config file property name | Environment variable name | Default value | Description |
+|--------------------------|--------------------------|---------------|-------------|
+| id                       | AIRGAP_DOWNSTREAM_ID       |               | Name of the instance. Will be used in logging and when sending status messages |
+| verbose                  | AIRGAP_DOWNSTREAM_VERBOSE  | false         | true gives extra logging |
+| nic                      | AIRGAP_DOWNSTREAM_NIC      |               | What nic to use for binding the UDP port |
+| targetIP                 | AIRGAP_DOWNSTREAM_TARGET_IP  |               | Ip address to bind to |
+| targetPort               | AIRGAP_DOWNSTREAM_TARGET_PORT |               | Port to bind to |
+| bootstrapServers         | AIRGAP_DOWNSTREAM_BOOTSTRAP_SERVERS |               | Bootstrap url for Kafka, with port |
+| topic                    | AIRGAP_DOWNSTREAM_TOPIC    |               | Topic name in Kafka to write to (internal logging). Topic name for events from the upstream topics will have the same name as the upstream topic, if not translated by the setting AIRGAP_DOWNSTREAM_TOPIC_TRANSLATIONS |
+| clientId                 | AIRGAP_DOWNSTREAM_CLIENT_ID    |               | Id to use when writing to Kafka |
+| mtu                      | AIRGAP_DOWNSTREAM_MTU      | 0             | 0 - ask the NIC for the MTU, else enter a positive integer |
+| target                   | AIRGAP_DOWNSTREAM_TARGET   | kafka         | kafka or cmd are valid values |
+| privateKeyFiles          | AIRGAP_DOWNSTREAM_PRIVATE_KEY_FILES |               | Glob covering all private key files to load |
+| logFileName              | AIRGAP_DOWNSTREAM_LOG_FILE_NAME |          | If configured, all logs will be written to this file instead of the console. This will take effekt after the configuration is read and no errors occurs |
+| certFile                 | AIRGAP_DOWNSTREAM_CERT_FILE |               | For TLS to Kafka, add a certificate pem encoded file here |
+| keyFile                  | AIRGAP_DOWNSTREAM_KEY_FILE  |               | The private key for the certFile certificate |
+| caFile                   | AIRGAP_DOWNSTREAM_CA_FILE   |               | The CA that issued the Kafka server's certificate |
+| topicTranslations        | AIRGAP_DOWNSTREAM_TOPIC_TRANSLATIONS |            | Rename topics with a specified name to another name. Used in multi downstreams setup (see Redundancy and Load Balancing.md) |
 
-```properties
-id=Gap_Detector_1
-bootstrapServers=192.168.153.138:9092
-topic=log
-topicOut=dedup
-verbose=false
-clientId=gap_detector
-sendGapsEverySeconds=5
-from=2024-01-30T12:54:15+01:00
-gapSaveFile=tmp/gaps.json
-```
+### Deduplicator and Gap Detector
+Deduplicator and Gap Detector is covered in the [Deduplication.md](doc/Deduplication.md) documentation
+
+
 ### Logging
-All code uses the log logging packets. To be able to write the most important logs to a file, a new variable, Logger, is introduced, that can accept a file name from the configuration. All code is not yet connected to that logging output so some logging will still write to stdout. Important events that can be delivered in the output of the code (event stream) are also sent into the event stream.
+All code uses the log logging packets. To be able to write the most important logs to a file, a new variable, Logger, is introduced, that can accept a file name from the configuration. Important events that can be delivered in the output of the code (event stream) are also sent into the event stream.
 
 # Possible Problems
 Some problems that may arise are:
 - The UDP sending fails. Check that you have static arp (arp -s) and route (ip route add) enabled.
-- If the UDP connection is very unstable, then the gap file (and memory footprint) may grow very large. Consider monitoring the gap file and alert if it grows too much
-- If the UDP connection is very unstable, then condider using two instances of upstream/downstream sending the same information over two different hardwar diodes to the same Kafka and the same topic. Duplicates should be removed by the gap-detection so the result should be a more stable connection.
+- If the UDP connection is very unstable, then condider using two instances of upstream/downstream sending the same information over two different hardware diodes to the same Kafka and the same topic. Duplicates should be removed by the gap-detection so the result should be a more stable connection.
 
 # Service
 The applications responds to os signals and can be installed as a service in, e.g., Linux. 
@@ -232,10 +269,10 @@ See https://fabianlee.org/2022/10/29/golang-running-a-go-binary-as-a-systemd-ser
 ## Compile
 There is a Makefile that will get the latest tag from git and save in version.go, then build upstream and downstream.
 ```bash
-make            # builds both upstream and downstream
+make            # builds both upstream and downstream as well as building the deduplication Java project
 make upstream   # builds only upstream
 make downstream # builds only downstream
-make clean      # removes binaries and version.go
+make clean      # removes binaries and version.go, then performs a make
 ```
 To build manually, change directory to the application you would like to build (./src/upstream, ...). 
 Compile the applications with `go build {filename}`.
@@ -248,44 +285,120 @@ go build upstream.go
 
 Now we have a compiled file called `upstream`. We can run the application with `./upstream`, but you will still need a configuration file.
 
-To turn the application into a service we need to create a service file: `/lib/systemd/system/upstreamservice.service`
+## Run the upstream and downstream applications as Linux services (systemd)
+To turn the application into a service we need to create a service file: `/etc/systemd/system/upstream.service`
 Change the paths to where you will install the service binary and comfiguration file
 
 ```properties
 [Unit]
-Description=Upstream Diode service
-ConditionPathExists=/home/ubuntu/work/src/upstream/upstream
+Description=Upstream AirGap service
+ConditionPathExists=/opt/airgap/upstream/bin
 After=network.target
- 
+StartLimitIntervalSec=60
+
 [Service]
 Type=simple
-User=upstream
-Group=upstream
+User=root
+Group=root
 LimitNOFILE=1024
+StandardOutput=append:/var/log/airgap/upstream/stdout.log
+StandardError=append:/var/log/airgap/upstream/stderr.log
+
+# Set min and max memory (in bytes, e.g., 256M min, 1G max)
+MemoryMin=256M
+MemoryMax=1G
 
 Restart=on-failure
 RestartSec=10
-startLimitIntervalSec=60
 
-WorkingDirectory=/home/ubuntu/work/src/upstream
-ExecStart=/home/ubuntu/work/src/upstream/upstream configfile.properties
+WorkingDirectory=/opt/airgap/upstream
+ExecStart=/opt/airgap/upstream/bin/fedora-upstream /opt/airgap/upstream/upstream.properties
 
 # make sure log directory exists and owned by syslog
 PermissionsStartOnly=true
-ExecStartPre=/bin/mkdir -p /var/log/upstream
-ExecStartPre=/bin/chown syslog:adm /var/log/upstream
-ExecStartPre=/bin/chmod 755 /var/log/upstream
-SyslogIdentifier=upstream
- 
+ExecStartPre=/bin/mkdir -p /var/log/airgap/upstream
+ExecStartPre=/bin/chown root:root /var/log/airgap/upstream
+ExecStartPre=/bin/chmod 755 /var/log/airgap/upstream
+SyslogIdentifier=root
+
 [Install]
 WantedBy=multi-user.target
 ```
 
-## Enable serice and start
+You can also use the environment variables for configuration.
+Example systemd service file (`/etc/systemd/system/upstream.service`):
+
+```ini
+[Unit]
+Description=Upstream AirGap service (env config)
+ConditionPathExists=/opt/airgap/upstream/bin
+After=network.target
+StartLimitIntervalSec=60
+
+[Service]
+Type=simple
+User=root
+Group=root
+LimitNOFILE=1024
+StandardOutput=append:/var/log/airgap/upstream/stdout.log
+StandardError=append:/var/log/airgap/upstream/stderr.log
+
+
+# Set environment variables for configuration
+Environment="AIRGAP_UPSTREAM_ID=Upstream_10"
+Environment="AIRGAP_UPSTREAM_NIC=ens160"
+Environment="AIRGAP_UPSTREAM_TARGET_IP=192.168.153.14"
+Environment="AIRGAP_UPSTREAM_TARGET_PORT=1234"
+Environment="AIRGAP_UPSTREAM_BOOTSTRAP_SERVERS=192.168.153.145:9092"
+Environment="AIRGAP_UPSTREAM_TOPIC=transfer"
+Environment="AIRGAP_UPSTREAM_GROUP_ID=test"
+Environment="AIRGAP_UPSTREAM_MTU=auto"
+Environment="AIRGAP_UPSTREAM_LOG_FILE_NAME=/var/log/airgap/upstream/upstream.log"
+Environment="AIRGAP_UPSTREAM_VERBOSE=true"
+#Environment='AIRGAP_UPSTREAM_SENDING_THREADS={"now": 0}'
+#Environment="AIRGAP_UPSTREAM_GENERATE_NEW_SYMMETRIC_KEY_EVERY=3600"
+#Environment="AIRGAP_UPSTREAM_PUBLIC_KEY_FILE=/opt/kafka/certs/server2.pem"
+#Environment="AIRGAP_UPSTREAM_CERT_FILE="
+#Environment="AIRGAP_UPSTREAM_KEY_FILE="
+#Environment="AIRGAP_UPSTREAM_CA_FILE="
+#Environment="AIRGAP_UPSTREAM_DELIVER_FILTER="  
+
+# Set min and max memory (in bytes, e.g., 256M min, 1G max)
+MemoryMin=256M
+MemoryMax=1G
+
+Restart=on-failure
+RestartSec=10
+
+WorkingDirectory=/opt/airgap/upstream
+ExecStart=/opt/airgap/upstream/bin/fedora-upstream
+
+# make sure log directory exists and owned by syslog
+PermissionsStartOnly=true
+ExecStartPre=/bin/mkdir -p /var/log/airgap/upstream
+ExecStartPre=/bin/chown root:root /var/log/airgap/upstream
+ExecStartPre=/bin/chmod 755 /var/log/airgap/upstream
+SyslogIdentifier=root
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Notes:**
+- You can set any configuration parameter using the `AIRGAP_UPSTREAM_*` environment variables.
+- `MemoryMin` and `MemoryMax` are systemd ResourceControl options (see `man systemd.resource-control`). For Go binaries, these set cgroup memory limits (like Java's `-Xms`/`-Xmx`).
+- Remove the `configfile.properties` argument from `ExecStart` when using only environment variables.
+
+
+### Enable serice and start
 ```
 sudo systemctl enable upstream.service
 sudo systemctl start upstream
 ```
+
+### Downstream
+Downstream can be run as a service in the same manner as upstream.
+
 
 ## Dependencies
 air-gap uses IBM/sarama for the Kafka read/write. For other dependencies, check the go.mod file.
@@ -294,6 +407,13 @@ air-gap uses IBM/sarama for the Kafka read/write. For other dependencies, check 
 See LICENSE file
 
 # Release Notes
+
+## 0.1.3-SNAPSHOT
+* Added a Kafka Streams Java Application for deduplication and gap detection. Gap detection not finished.
+* Added upstreams filter to filter on the offset number for each partition (used in redundancy an load balancing setups)
+* Added a topic name mapping in downstream so a topic with a specified name upstream can be written to another topic downstream (used in redundancy an load balancing setups)
+* Added documentation for the new features.
+* Added JMX monitoring of the deduplication application. Added system monitoring documentation
 
 ## 0.1.2-SNAPSHOT
 * All configuration from files can be overridden by environment variables. See Configuration Upstream

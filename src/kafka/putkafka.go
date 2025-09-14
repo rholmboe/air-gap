@@ -8,10 +8,11 @@ import (
 )
 
 type MessageCacheEntry struct {
-	end   time.Time
-	key   string
-	val   []byte
-	topic string
+	end       time.Time
+	key       string
+	val       []byte
+	topic     string
+	partition int32
 }
 
 type MessageCache struct {
@@ -57,7 +58,7 @@ func StartBackgroundThread() {
 				length := len(cache.entries)
 				for i := 0; i < len(cache.entries); i++ {
 					entry := cache.entries[i]
-					DoWriteToKafka(entry.key, entry.topic, entry.val)
+					DoWriteToKafka(entry.key, entry.topic, entry.partition, entry.val)
 				}
 				cache.mu.Lock()
 				cache.entries = cache.entries[length:]
@@ -91,19 +92,20 @@ func StopBackgroundThread() {
 // messageKey: A unique identifier for the message. This key is used to retrieve the message from the cache.
 // topics: The Kafka topic where the message will be published.
 // message: The message to be published to the Kafka topic.
-func WriteToKafka(messageKey string, topics string, message []byte) {
+func WriteToKafka(messageKey string, topics string, partition int32, message []byte) {
 	cache.mu.Lock()
 	cache.entries = append(cache.entries, MessageCacheEntry{
-		end:   time.Now().Add(time.Millisecond + TTL),
-		key:   messageKey,
-		val:   message,
-		topic: topics,
+		end:       time.Now().Add(time.Millisecond + TTL),
+		key:       messageKey,
+		val:       message,
+		topic:     topics,
+		partition: partition,
 	})
 	cache.mu.Unlock()
 }
 
 // Background thread that sends messages to Kafka.
-func DoWriteToKafka(messageKey string, topics string, message []byte) {
+func DoWriteToKafka(messageKey string, topics string, partition int32, message []byte) {
 	defer func() {
 		if r := recover(); r != nil {
 			Logger.Printf("Recovered from panic in DoWriteToKafka: %v", r)
@@ -112,12 +114,16 @@ func DoWriteToKafka(messageKey string, topics string, message []byte) {
 	if producer == nil {
 		return
 	}
-	// Create a new message
 	msg := &sarama.ProducerMessage{
-		Topic: topics,
-		Key:   sarama.StringEncoder(messageKey),
-		Value: sarama.StringEncoder(message),
+		Topic:     topics,
+		Key:       sarama.StringEncoder(messageKey),
+		Value:     sarama.StringEncoder(message),
+		Partition: partition,
 	}
-	// Send the message asynchronously to Kafka
+	Logger.Printf("Sending message with key %s to Kafka topic %s partition %d\n", messageKey, topics, partition)
+
+	if msg.Partition != partition {
+		Logger.Printf("WARNING: Partition mismatch before send! msg.Partition=%d, requested=%d", msg.Partition, partition)
+	}
 	producer.Input() <- msg
 }

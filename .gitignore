@@ -6,3 +6,5 @@ src/upstream/tmp/upstream.log
 config/testcases/
 target/
 certs/tmp/
+**/*/.$*
+*.log

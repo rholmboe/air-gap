@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Try to assemble a message from the supplied message fragment and
@@ -22,6 +23,16 @@ func assembleMessage(msg MessageCacheEntry) ([]byte, error) {
 		}
 	}
 	return result, nil
+}
+
+// Parse the message id and return topic, partition and offset
+func ParseMessageId(id string) (string, string, string, error) {
+	const delimiter = "_"
+	parts := strings.Split(id, delimiter)
+	if len(parts) != 3 {
+		return "", "", "", fmt.Errorf("invalid message id format")
+	}
+	return parts[0], parts[1], parts[2], nil
 }
 
 // Parse a message from a byte array. The message contains a header and a payload

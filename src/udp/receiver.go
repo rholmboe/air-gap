@@ -46,14 +46,15 @@ func ListenUDPWithStop(address string, port int, callback func(arg []byte), mtu 
 				fmt.Println(err)
 				continue
 			}
-			callback(buf[:n])
+			// Copy the data before passing it to the callback
+			callback(append([]byte(nil), buf[:n]...))
 		}
 	}
 }
 
 // Handle a connection
 // Just call the callback function with the data for every received packet
-func handleConnection(conn *net.UDPConn, addr *net.UDPAddr, wg *sync.WaitGroup, callback func(arg []byte), mtu uint16) {
+func handleConnection(conn *net.UDPConn, _ *net.UDPAddr, wg *sync.WaitGroup, callback func(arg []byte), mtu uint16) {
 	defer wg.Done()
 
 	buf := make([]byte, mtu)

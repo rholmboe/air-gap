@@ -131,10 +131,11 @@ func sendMessage(id string, topic string, message []byte) {
 	//    var item = gap_util.Item{ // Use the fully qualified name of the Item struct
 	//		ID:      id,
 	//		Topic:   topic,
+	// 		Partition: -1, don't care about what partition it winds up in
 	//		Message: message,
 	//	}
 
-	kafka.WriteToKafka(id, topic, message)
+	kafka.WriteToKafka(id, topic, -1, message)
 }
 
 // This is called for every message read from Kafka
@@ -351,9 +352,9 @@ func main() {
 		Logger.Fatalf("Error updating the config with the new from value '', err: %s", err)
 	}
 
-    // Now, read from Kafka and call our handler for each message:
-    kafka.ReadFromKafka("gap_detector", 0, config.bootstrapServers, config.topic, config.clientID, config.from, handleKafkaMessage)
-    // The above line will keep processing messages until a signal is received, when we will proceed
+	// Now, read from Kafka and call our handler for each message:
+	kafka.ReadFromKafka("gap_detector", 0, config.bootstrapServers, config.topic, config.clientID, config.from, handleKafkaMessage)
+	// The above line will keep processing messages until a signal is received, when we will proceed
 
 	Logger.Printf("Shutting down gracefully. Please wait...")
 	// Give the Kafka writer some time to catch up

@@ -1,4 +1,4 @@
-package main
+package filter
 
 // This program is a simple filter that can be used to filter out packets
 // based on a configuration. The configuration is a comma separated list of
@@ -17,52 +17,100 @@ package main
 // sender with 1,2,4,5,7,8 the second with 2,3,5,6,8,9 and the third
 // with 3,4,6,7,9,10. Now, every packet will be delivered twice over three paths.
 
-
 import (
+	"fmt"
 	"log"
 	"strconv"
 	"strings"
 )
 
+type Filter struct {
+	groups [][]int64
+	k      int64
+}
+
+func NewFilter(config string) (*Filter, error) {
+	parts := strings.Split(config, ",")
+
+	itemsPerGroup := len(parts) / 3
+	if len(parts)%3 != 0 {
+		return nil, fmt.Errorf("number of items should be divisible by 3")
+	}
+	groups := make([][]int64, 3)
+	for j := 0; j < 3; j++ {
+		intArray := make([]int64, itemsPerGroup)
+		for i := 0; i < itemsPerGroup; i++ {
+			intValue, _ := strconv.Atoi(parts[j*itemsPerGroup+i])
+			intArray[i] = int64(intValue)
+		}
+		groups[j] = intArray
+	}
+
+	k := groups[1][0] - groups[0][0]
+	if groups[2][0] != groups[1][0]+k {
+		log.Fatalf("The third group starts with an unexpected number. Got %d but expected %d",
+			groups[2][0], groups[1][0]+k)
+	}
+	e := doSelfTest(groups, k)
+	if e != nil {
+		log.Fatalf("The self test of the expression %s failed with error: %v", config, e)
+	} else {
+		log.Printf("Self test of the expression ok")
+	}
+	return &Filter{
+		groups: groups,
+		k:      k,
+	}, nil
+}
+
+func (f *Filter) Check(number int64) bool {
+	pos := ((number - 1) % int64(f.k)) + 1
+	for i := 0; i < len(f.groups[0]); i++ {
+		if f.groups[0][i] == pos {
+			return true
+		}
+	}
+	return false
+}
+
 func isValidNumber(number int64, groups [][]int64, k int64) bool {
-    // Get the remainder of the division
-    pos := ((number - 1) % int64(k)) + 1
-    for i := 0; i < len(groups[0]); i++ {
-        if groups[0][i] == pos {
-            return true
-        }
-    }
-    return false
+	pos := ((number - 1) % int64(k)) + 1
+	for i := 0; i < len(groups[0]); i++ {
+		if groups[0][i] == pos {
+			return true
+		}
+	}
+	return false
 }
 
 func inGroup(nr int64, groups [][]int64) bool {
-    for i := 0; i < len(groups); i++ {
-        for j:= 0; j < len (groups[i]); j++ {
-            if (nr == groups[i][j]) {
-                return true;
-            }
-        }
-    }
-    return false;
+	for i := range groups {
+		for j := 0; j < len(groups[i]); j++ {
+			if nr == groups[i][j] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
-func doSelfTest(groups [][]int64, k int64) bool {
-    largestNumber := int(groups[2][len(groups[2])-1]) // Convert largestNumber to int
-    // Perform self test logic here
-    for i := 0; i < largestNumber; i++ {
-        valid := isValidNumber(int64(i), groups, k) // Convert i to int64
-        isInGroups := inGroup(int64(i), groups) // Convert i to int64
-        log.Printf("%d: isValid returned %v inGroup returned %v",
-            i, valid, isInGroups)
-        if valid != isInGroups {
-            log.Printf("%d: isValid returned %v inGroup returned %v",
-                i, valid, isInGroups)
-            return false
-        }
-    }
-    return true
+func doSelfTest(groups [][]int64, k int64) error {
+	largestNumber := int(groups[2][len(groups[2])-1]) // Convert largestNumber to int
+	// Perform self test logic here
+	for i := 0; i < largestNumber; i++ {
+		valid := isValidNumber(int64(i), groups, k) // Convert i to int64
+		isInGroups := inGroup(int64(i), groups)     // Convert i to int64
+		log.Printf("%d: isValid returned %v inGroup returned %v",
+			i, valid, isInGroups)
+		if valid != isInGroups {
+			log.Printf("%d: isValid returned %v inGroup returned %v",
+				i, valid, isInGroups)
+			return fmt.Errorf("self test failed for %d: isValid returned %v, inGroup returned %v",
+				i, valid, isInGroups)
+		}
+	}
+	return nil
 }
-
 
 // Test the filter from the command line. Here, we test the filter with a
 // configuration of 2,3,22,23,42,43, that is, we should send the packets
@@ -71,36 +119,13 @@ func doSelfTest(groups [][]int64, k int64) bool {
 // iteratio (2,3,22,23) but the last group is added to verify that the user
 // has entered the correct configuration.
 func main() {
-    config := "2,3,22,23,42,43"
-    parts := strings.Split(config, ",")
+	f, err := NewFilter("2,3,22,23,42,43")
+	if err != nil {
+		log.Fatalf("Error creating filter: %v", err)
+	}
 
-    itemsPerGroup := len(parts) / 3
-    if len(parts)%3 != 0 {
-        log.Fatal("Number of items should be divisible by 3")
-    }
-    // groups is an array of size 3 with int arrays as items
-    groups := make([][]int64, 3)
-    for j := 0; j < 3; j++ {
-        intArray := make([]int64, itemsPerGroup)
-        for i := 0; i < itemsPerGroup; i++ {
-            intValue, _ := strconv.Atoi(parts[j*itemsPerGroup + i])
-            intArray[i] = int64(intValue)
-        }
-        groups[j] = intArray
-    }
-
-    k := groups[1][0] - groups[0][0]
-    if groups[2][0] != groups[1][0]+k {
-        log.Fatalf("The third group starts with an unexpected number. Got %d but expected %d",
-            groups[2][0], groups[1][0]+k)
-    }
-    if !doSelfTest(groups, k) {
-        log.Fatalf("The self test of the expression %s failed", config)
-    } else {
-        log.Printf("Self test of the expression ok")
-    }
-    // from := 23413421342141234
-    // for i := from; i < 20+ from; i++ {
-    //     log.Printf("%d -> %v", i, isValidNumber(int64(i), groups, k))
-    // }
+	from := int64(23413421342141234)
+	for i := from; i < 20+from; i++ {
+		log.Printf("%d -> %v", i, f.Check(i))
+	}
 }

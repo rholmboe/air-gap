@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -41,25 +42,26 @@ type KeyInfo struct {
 
 // TransferConfiguration struct definition
 type TransferConfiguration struct {
-	id               string
-	nic              string
-	targetIP         string
-	targetPort       int
-	bootstrapServers string
-	topic            string
-	mtu              uint16
-	from             string
-	key              []byte    // symmetric
-	keyInfos         []KeyInfo // array of private keys
-	privateKeyGlob   string
-	target           string
-	verbose          bool
-	logFileName      string
-	certFile         string
-	keyFile          string
-	caFile           string
-	producer         sarama.AsyncProducer
-	clientID         string
+	id                string
+	nic               string
+	targetIP          string
+	targetPort        int
+	bootstrapServers  string
+	topic             string
+	mtu               uint16
+	key               []byte    // symmetric
+	keyInfos          []KeyInfo // array of private keys
+	privateKeyGlob    string
+	target            string
+	verbose           bool
+	logFileName       string
+	certFile          string
+	keyFile           string
+	caFile            string
+	producer          sarama.AsyncProducer
+	clientID          string
+	topicTranslations string
+	translations      map[string]string // map from input topic to output topic
 }
 
 var Logger = log.New(os.Stdout, "", log.LstdFlags)
@@ -80,7 +82,7 @@ func readPrivateKeys(fileGlob string) []KeyInfo {
 	if err != nil {
 		// Send message to Kafka
 		message := fmt.Sprintf("Can't read private key files from file glob %s, %v", fileGlob, err)
-		sendMessage(protocol.TYPE_ERROR, "", config.topic, []byte(message))
+		sendMessage(protocol.TYPE_ERROR, "", config.topic, "", []byte(message))
 	}
 
 	// Purge from memory if not on disk
@@ -109,7 +111,7 @@ func readPrivateKeys(fileGlob string) []KeyInfo {
 		file, err := os.Open(fileName)
 		if err != nil {
 			// File open error
-			sendMessage(protocol.TYPE_ERROR, "", config.topic, fmt.Appendf(nil, "Can't read private key from file %s, %v", fileName, err))
+			sendMessage(protocol.TYPE_ERROR, "", config.topic, "", fmt.Appendf(nil, "Can't read private key from file %s, %v", fileName, err))
 		}
 		defer file.Close()
 
@@ -134,7 +136,7 @@ func readPrivateKeys(fileGlob string) []KeyInfo {
 		// Decode the base64 encoded variable
 		derData, err := base64.StdEncoding.DecodeString(b64Data)
 		if err != nil {
-			sendMessage(protocol.TYPE_ERROR, "", config.topic, fmt.Appendf(nil, "Error decoding base64 data: %v", err))
+			sendMessage(protocol.TYPE_ERROR, "", config.topic, "", fmt.Appendf(nil, "Error decoding base64 data: %v", err))
 		}
 		// hash the key so we can see if it's loaded already
 		derString := fmt.Sprintf("%x", sha256.Sum256(derData))
@@ -143,7 +145,7 @@ func readPrivateKeys(fileGlob string) []KeyInfo {
 		addKey := true
 		for j := 0; j < len(config.keyInfos); j++ {
 			if config.keyInfos[j].privateKeyHash == derString {
-				sendMessage(protocol.TYPE_ERROR, "", config.topic, fmt.Appendf(nil, "Key file %s already loaded", config.keyInfos[j].privateKeyFilename))
+				sendMessage(protocol.TYPE_ERROR, "", config.topic, "", fmt.Appendf(nil, "Key file %s already loaded", config.keyInfos[j].privateKeyFilename))
 				addKey = false
 			}
 		}
@@ -151,12 +153,12 @@ func readPrivateKeys(fileGlob string) []KeyInfo {
 		// Parse the DER encoded private key
 		key, err := x509.ParsePKCS8PrivateKey(derData)
 		if err != nil {
-			sendMessage(protocol.TYPE_ERROR, "", config.topic, fmt.Appendf(nil, "Error parsing private key: %v", err))
+			sendMessage(protocol.TYPE_ERROR, "", config.topic, "", fmt.Appendf(nil, "Error parsing private key: %v", err))
 		}
 
 		privateKey, ok := key.(*rsa.PrivateKey)
 		if !ok {
-			sendMessage(protocol.TYPE_ERROR, "", config.topic, []byte("Private key is not of type *rsa.PrivateKey"))
+			sendMessage(protocol.TYPE_ERROR, "", config.topic, "", []byte("Private key is not of type *rsa.PrivateKey"))
 		}
 
 		if addKey {
@@ -166,7 +168,7 @@ func readPrivateKeys(fileGlob string) []KeyInfo {
 				privateKeyHash:     derString,
 			}
 			config.keyInfos = append(config.keyInfos, keyInfo)
-			sendMessage(protocol.TYPE_STATUS, "", config.topic, fmt.Appendf(nil, "Successfully loaded key file: %s", fileName))
+			sendMessage(protocol.TYPE_STATUS, "", config.topic, "", fmt.Appendf(nil, "Successfully loaded key file: %s", fileName))
 		}
 	}
 	return config.keyInfos
@@ -179,6 +181,7 @@ func defaultConfiguration() TransferConfiguration {
 	config.target = "kafka"
 	config.logFileName = ""
 	config.mtu = 0 // default auto
+	config.translations = make(map[string]string)
 	return config
 }
 
@@ -188,6 +191,7 @@ func readParameters(fileName string, result TransferConfiguration) (TransferConf
 	file, err := os.Open(fileName)
 	if err != nil {
 		// No file, but that's ok. Maybe the user only uses environment variables
+		Logger.Printf("File: %s not found. Continuing with environment variables configuration...", fileName)
 		return TransferConfiguration{}, nil
 	}
 	defer file.Close()
@@ -284,6 +288,9 @@ func readParameters(fileName string, result TransferConfiguration) (TransferConf
 		case "caFile":
 			result.caFile = value
 			Logger.Printf("caFile: %s", value)
+		case "topicTranslations":
+			// Json like {"inputTopic1":"outputTopic1","inputTopic2":"outputTopic2"}
+			result.topicTranslations = value
 		}
 	}
 
@@ -335,10 +342,6 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 			config.mtu = uint16(mtuInt)
 		}
 	}
-	if from := os.Getenv(prefix + "FROM"); from != "" {
-		Logger.Print("Overriding from with environment variable: " + prefix + "FROM" + " with value: " + from)
-		config.from = from
-	}
 	if privateKeyGlob := os.Getenv(prefix + "PRIVATE_KEY_GLOB"); privateKeyGlob != "" {
 		Logger.Print("Overriding privateKeyGlob with environment variable: " + prefix + "PRIVATE_KEY_GLOB" + " with value: " + privateKeyGlob)
 		config.privateKeyGlob = privateKeyGlob
@@ -367,6 +370,10 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 		Logger.Print("Overriding caFile with environment variable: " + prefix + "CA_FILE" + " with value: " + caFile)
 		config.caFile = caFile
 	}
+	if topicTranslations := os.Getenv(prefix + "TOPIC_TRANSLATIONS"); topicTranslations != "" {
+		Logger.Print("Overriding topicTranslations with environment variable: " + prefix + "TOPIC_TRANSLATIONS" + " with value: " + topicTranslations)
+		config.topicTranslations = topicTranslations
+	}
 
 	return config
 }
@@ -375,6 +382,8 @@ func connectToKafka(configuration TransferConfiguration) {
 	Logger.Printf("Connecting to %s\n", config.bootstrapServers)
 	// Check if we have TLS to Kafka
 	conf := sarama.NewConfig()
+	// Tell Sarama to use manual partitioning - we provide the partition in the ProducerMessage
+	conf.Producer.Partitioner = sarama.NewManualPartitioner
 	// Check if we have TLS to Kafka
 	if configuration.certFile != "" || configuration.keyFile != "" || configuration.caFile != "" {
 		Logger.Print("Using TLS for Kafka")
@@ -387,6 +396,8 @@ func connectToKafka(configuration TransferConfiguration) {
 	}
 	conf.Producer.RequiredAcks = sarama.WaitForLocal
 	conf.Producer.Return.Successes = true
+	conf.Producer.Return.Errors = true
+	conf.Net.KeepAlive = 30 * time.Second
 	conf.ClientID = config.clientID
 	producer, err := sarama.NewAsyncProducer(strings.Split(config.bootstrapServers, ","), conf)
 	if err != nil {
@@ -400,7 +411,18 @@ func connectToKafka(configuration TransferConfiguration) {
 	go func() {
 		for msg := range producer.Successes() {
 			if config.verbose {
-				Logger.Println("Message sent:", msg)
+				// Log at most 80 characters from msg. Note that msg can be shorter
+				valueBytes, err := msg.Value.Encode()
+				keyBytes, _ := msg.Key.Encode()
+				if err != nil {
+					Logger.Println("Error encoding message value:", err)
+				} else {
+					if len(valueBytes) > 80 {
+						Logger.Printf("Message sent: key=%s partition=%d %s ...", string(keyBytes), msg.Partition, string(valueBytes[:80]))
+					} else {
+						Logger.Printf("Message sent: key=%s partition=%d %s", string(keyBytes), msg.Partition, string(valueBytes))
+					}
+				}
 			}
 		}
 	}()
@@ -437,8 +459,7 @@ func main() {
 		}
 		// Pick up environment variable overrides after reading config file
 		configuration = overrideConfiguration(configuration)
-		config = configuration
-		checkConfiguration(config)
+		config = checkConfiguration(configuration)
 		if config.logFileName != "" {
 			Logger.Println("Setting up log to file: " + config.logFileName)
 			err := logfile.SetLogFile(config.logFileName, Logger)
@@ -501,11 +522,11 @@ func main() {
 		}
 		if udpStarted {
 			Logger.Printf("Starting UDP Server on %s:%d\n", config.targetIP, config.targetPort)
-			// Connect to Kafka and start background thread
-			connectToKafka(config)
-			kafka.StartBackgroundThread()
+			// // Connect to Kafka and start background thread
+			// connectToKafka(config)
+			// kafka.StartBackgroundThread()
 			// Send to Kafka too:
-			sendMessage(protocol.TYPE_STATUS, "", config.topic, fmt.Appendf(nil, "Downstream %s starting UDP server on port %d", config.id, config.targetPort))
+			sendMessage(protocol.TYPE_STATUS, "", config.topic, "", fmt.Appendf(nil, "Downstream %s starting UDP server on port %d", config.id, config.targetPort))
 			go func() {
 				udp.ListenUDPWithStop(config.targetIP, config.targetPort, handleUdpMessage, config.mtu, udpStopChan)
 				close(udpDoneChan)
@@ -521,7 +542,7 @@ func main() {
 		select {
 		case <-sigterm:
 			Logger.Printf("%s: Received SIGINT/SIGTERM, exiting...", config.id)
-			sendMessage(protocol.TYPE_STATUS, "", config.topic, []byte("terminating by signal"))
+			sendMessage(protocol.TYPE_STATUS, "", config.topic, "", []byte("terminating by signal"))
 			// Stop receiving new UDP data only if UDP was started
 			if udpStarted && udpStopChan != nil {
 				close(udpStopChan)
@@ -562,7 +583,6 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Printf("  bootstrapServers: %s", config.bootstrapServers)
 	Logger.Printf("  topic: %s", config.topic)
 	Logger.Printf("  mtu: %d", config.mtu)
-	Logger.Printf("  from: %s", config.from)
 	Logger.Printf("  privateKeyGlob: %s", config.privateKeyGlob)
 	Logger.Printf("  target: %s", config.target)
 	Logger.Printf("  verbose: %t", config.verbose)
@@ -570,10 +590,11 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Printf("  certFile: %s", config.certFile)
 	Logger.Printf("  keyFile: %s", config.keyFile)
 	Logger.Printf("  caFile: %s", config.caFile)
+	Logger.Printf("  topicTranslations: %s", config.topicTranslations)
 }
 
 // Check the configuration. On fail, will terminate the application
-func checkConfiguration(result TransferConfiguration) {
+func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 	Logger.Print("Validating the configuration...")
 
 	// Must have an id
@@ -624,6 +645,13 @@ func checkConfiguration(result TransferConfiguration) {
 			Logger.Fatalf("Missing required configuration: caFile")
 		}
 	}
+	if result.topicTranslations != "" {
+		if err := json.Unmarshal([]byte(result.topicTranslations), &result.translations); err != nil {
+			Logger.Fatalf("Error in config topicTranslations. Illegal value: %s. Legal values are JSON objects 'from': 'to', ...", result.topicTranslations)
+		}
+	}
+	Logger.Print("Configuration OK")
+	return result
 }
 
 // To be able to assemble fragmented events
@@ -632,10 +660,23 @@ func checkConfiguration(result TransferConfiguration) {
 // Old events are removed from the cache by another thread
 var cache = protocol.CreateMessageCache()
 
+func getTopicTranslation(inputTopic string) string {
+	if config.topicTranslations != "" {
+		if outputTopic, ok := config.translations[inputTopic]; ok {
+			if config.verbose {
+				Logger.Printf("Translating topic '%s' to '%s'\n", inputTopic, outputTopic)
+			}
+			return outputTopic
+		}
+	}
+	return inputTopic
+}
+
 // Send a message to Kafka or stdout
-func sendMessage(messageType uint8, id string, topic string, message []byte) {
+func sendMessage(messageType uint8, id string, topicName string, partitionStr string, message []byte) {
 	// For extra printouts, change this:
 	verbose := config.verbose
+	topic := getTopicTranslation(topicName)
 	// If no id, just create one
 	var messageKey string
 	if id == "" {
@@ -643,6 +684,14 @@ func sendMessage(messageType uint8, id string, topic string, message []byte) {
 	} else {
 		messageKey = id
 	}
+	if partitionStr == "" {
+		partitionStr = "-1"
+	}
+	partitionInt, err := strconv.Atoi(partitionStr)
+	if err != nil {
+		partitionInt = -1
+	}
+	partition := int32(partitionInt)
 	if verbose {
 		Logger.Printf("id: %s", id)
 		// Print at most 40 characters of the message
@@ -650,7 +699,7 @@ func sendMessage(messageType uint8, id string, topic string, message []byte) {
 		if len(msgStr) > 40 {
 			msgStr = msgStr[:40]
 		}
-		Logger.Printf("%s Sending cleartext message to %s: %s to topic: %s", config.id, config.target, msgStr, topic)
+		Logger.Printf("%s Sending cleartext message to %s: %s to topic: %s on partition: %d for message key: %s", config.id, config.target, msgStr, topic, partition, messageKey)
 	}
 	// If this is an error message, prepend a timestamp
 	var toSend []byte = message
@@ -662,7 +711,8 @@ func sendMessage(messageType uint8, id string, topic string, message []byte) {
 	// Send the data to Kafka
 	if config.target == "kafka" {
 		// Send the result to Kafka
-		kafka.WriteToKafka(messageKey, topic, toSend)
+		Logger.Printf("Sending message with key %s to Kafka topic %s partition %d\n", messageKey, topic, partition)
+		kafka.WriteToKafka(messageKey, topic, partition, toSend)
 	} else {
 		// send to stdout
 		os.Stdout.Write(toSend)
@@ -678,8 +728,17 @@ func handleUdpMessage(receivedBytes []byte) {
 	// Try our format
 	var messageType uint8
 	messageType, messageId, payload, ok := protocol.ParseMessage(receivedBytes, cache)
+
+	// Get the partition
+	topic, partition, offset, err := protocol.ParseMessageId(messageId)
+	if err != nil {
+		// May be a status message, not an actual message from the Upstream kafka
+		topic = config.topic // default
+		partition = "-1"     // Don't care about the partition
+	}
+
 	if config.verbose {
-		Logger.Printf("MessageType %d, messageId %s\n", messageType, messageId)
+		Logger.Printf("MessageType %d, messageId %s_%s_%s\n", messageType, topic, partition, offset)
 	}
 	nrErrorMessages := 0
 	errorMessageLastTime := time.Now()
@@ -695,26 +754,28 @@ func handleUdpMessage(receivedBytes []byte) {
 			// and send a key-change log event to Kafka
 			message := fmt.Appendf(nil, "Updating symmetric key with private key file: %s", keyFileNameUsed)
 			Logger.Print(string(message))
-			sendMessage(protocol.TYPE_STATUS, "", config.topic, message)
+			sendMessage(protocol.TYPE_STATUS, "", config.topic, "", message)
 		case protocol.TYPE_CLEARTEXT:
 			// Cleartext message
-			sendMessage(protocol.TYPE_MESSAGE, messageId, config.topic, payload)
+			sendMessage(protocol.TYPE_MESSAGE, messageId, topic, partition, payload)
 		case protocol.TYPE_MESSAGE:
 			// Encrypted message. Decrypt
 			decrypted, err := protocol.Decrypt(payload, config.key)
 			if err != nil {
 				// Error decrypting message. Always send the error message to Kafka
 				message := fmt.Appendf(nil, "ERROR decrypting message: %s", err)
-				sendMessage(protocol.TYPE_ERROR, messageId, config.topic, message)
+				Logger.Print(string(message))
+				sendMessage(protocol.TYPE_ERROR, messageId, config.topic, "", message)
 			} else {
 				// Decrypted message ok
-				sendMessage(protocol.TYPE_MESSAGE, messageId, config.topic, decrypted)
+				sendMessage(protocol.TYPE_MESSAGE, messageId, topic, partition, decrypted)
 			}
 		case protocol.TYPE_ERROR:
 			if nrErrorMessages == 0 {
 				// Always send first time an error occurs
 				message := fmt.Appendf(nil, "ERROR message received: %s", payload)
-				sendMessage(protocol.TYPE_ERROR, messageId, config.topic, message)
+				Logger.Print(string(message))
+				sendMessage(protocol.TYPE_ERROR, messageId, config.topic, "", message)
 				nrErrorMessages += 1
 			} else {
 				if time.Now().After(errorMessageLastTime.Add(errorMessageEvery)) {
@@ -722,7 +783,8 @@ func handleUdpMessage(receivedBytes []byte) {
 					message := fmt.Appendf(nil, "ERROR messages received: %d, last received: %s",
 						nrErrorMessages,
 						payload)
-					sendMessage(protocol.TYPE_ERROR, messageId, config.topic, message)
+					Logger.Print(string(message))
+					sendMessage(protocol.TYPE_ERROR, messageId, config.topic, "", message)
 				}
 			}
 		case protocol.TYPE_MULTIPART:
@@ -732,7 +794,7 @@ func handleUdpMessage(receivedBytes []byte) {
 			// Do nothing. Wait for the last fragment
 		default:
 			// Just send the text to Kafka with an empty ID (will create a new ID)
-			sendMessage(protocol.TYPE_MESSAGE, "", config.topic, payload)
+			sendMessage(protocol.TYPE_MESSAGE, "", config.topic, "", payload)
 		}
 	}
 }
@@ -762,12 +824,12 @@ func readNewKey(message []byte) string {
 		if err == nil {
 			if string(decrypted[0:11]) == "KEY_UPDATE#" {
 				// We got the correct key
-				sendMessage(protocol.TYPE_STATUS, "", config.topic, []byte(fmt.Sprintf("Got new symmetric key: %s", config.keyInfos[i].privateKeyFilename)))
+				sendMessage(protocol.TYPE_STATUS, "", config.topic, "", []byte(fmt.Sprintf("Got new symmetric key: %s", config.keyInfos[i].privateKeyFilename)))
 				config.key = decrypted[11:]
 				return config.keyInfos[i].privateKeyFilename
 			}
 		}
 	}
-	sendMessage(protocol.TYPE_ERROR, "", config.topic, []byte(fmt.Sprintf("Can't decrypt the new symmetric key. Tried all %v private keys\n", len(config.keyInfos))))
+	sendMessage(protocol.TYPE_ERROR, "", config.topic, "", []byte(fmt.Sprintf("Can't decrypt the new symmetric key. Tried all %v private keys\n", len(config.keyInfos))))
 	return "ERROR: No key found that can decrypt the new symmetric key"
 }

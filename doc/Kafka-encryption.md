@@ -37,14 +37,14 @@ req_extensions     = req_ext
 distinguished_name = dn
 
 [ dn ]
-CN = kafka-upstream.mydomain.com
+CN = kafka-upstream.sitia.nu
 
 [ req_ext ]
 subjectAltName = @alt_names
 
 [ alt_names ]
-DNS.1 = kafka-upstream.mydomain.com
-DNS.2 = kafka-upstream.mydomain.com
+DNS.1 = kafka-upstream.sitia.nu
+DNS.2 = kafka-upstream.sitia.nu
 ```
 
 #### kafka-downstream.cnf
@@ -57,14 +57,14 @@ req_extensions     = req_ext
 distinguished_name = dn
 
 [ dn ]
-CN = kafka-downstream.mydomain.com
+CN = kafka-downstream.sitia.nu
 
 [ req_ext ]
 subjectAltName = @alt_names
 
 [ alt_names ]
-DNS.1 = kafka-downstream.mydomain.com
-DNS.2 = kafka-downstream.mydomain.com
+DNS.1 = kafka-downstream.sitia.nu
+DNS.2 = kafka-downstream.sitia.nu
 ```
 
 
@@ -229,7 +229,7 @@ to `/opt/kafka/config/ssl/` on the upstream Kafka machine(s)
 Edit `server.properties`for each Kafka broker and add (change the domain name to your domain name):
 ```properties
 listeners=SSL://0.0.0.0:9093
-advertised.listeners=SSL://kafka-upstream.mydomain.com:9093
+advertised.listeners=SSL://kafka-upstream.sitia.nu:9093
 ssl.keystore.location=/opt/kafka/config/ssl/kafka-upstream.keystore.jks
 ssl.keystore.password=changeit
 ssl.key.password=changeit
@@ -280,11 +280,11 @@ ssl.truststore.password=changeit
 
 Now you should be able to restart Kafka and run (we only have one kafka so the producer.ssl.properties will work as a consumer.ssl.properties too)
 ```bash
-bin/kafka-console-consumer.sh --topic downstream --bootstrap-server kafka-upstream.mydomain.com:9093 --consumer.config ./config/producer.ssl.properties --from-beginning
+bin/kafka-console-consumer.sh --topic downstream --bootstrap-server kafka-upstream.sitia.nu:9093 --consumer.config ./config/producer.ssl.properties --from-beginning
 ```
 The command should give the same output as if you ran it on the plaintext port:
 ```bash
-bin/kafka-console-consumer.sh --topic downstream --bootstrap-server kafka-upstream.mydomain.com:9092  --from-beginning
+bin/kafka-console-consumer.sh --topic downstream --bootstrap-server kafka-upstream.sitia.nu:9092  --from-beginning
 ```
 
 Now, we up the difficulty a bit. We add authorization so clients not only need to have a certificate from a valid issues but also need to be present in an allow-list.
@@ -309,8 +309,8 @@ authorizer.class.name=org.apache.kafka.metadata.authorizer.StandardAuthorizer
 # Default deny everyone
 allow.everyone.if.no.acl.found=false
 
-# Make our kafka-upstream.mydomain.com user (the user in the Kafka upstream certificate) admin
-super.users=User:kafka-upstream.mydomain.com
+# Make our kafka-upstream.sitia.nu user (the user in the Kafka upstream certificate) admin
+super.users=User:kafka-upstream.sitia.nu
 
 # And map the CN name to the user name from the certificate.
 # This regex should be able to extract names from both the Kafka and upstream/downstream certificates:
@@ -329,11 +329,11 @@ listeners=SSL://0.0.0.0:9093,CONTROLLER://:9083
 and
 
 ```properties
-advertised.listeners=PLAINTEXT://192.168.153.144:9092,SSL://kafka-upstream.mydomain.com:9093
+advertised.listeners=PLAINTEXT://192.168.153.144:9092,SSL://kafka-upstream.sitia.nu:9093
 ```
 to
 ```properties
-advertised.listeners=SSL://kafka-upstream.mydomain.com:9093
+advertised.listeners=SSL://kafka-upstream.sitia.nu:9093
 ```
 
 If you have a cluster, the `inter.broker.listener.name` property must also be set to `SSL` and all the Kafka cluster certificate's CN added as admin with the property `super.users`.
@@ -346,7 +346,7 @@ Save and restart your Kafka
 First, try to access your Kafka without TLS
 
 ```bash
-bin/kafka-console-consumer.sh --topic downstream --bootstrap-server kafka-upstream.mydomain.com:9092  --from-beginning
+bin/kafka-console-consumer.sh --topic downstream --bootstrap-server kafka-upstream.sitia.nu:9092  --from-beginning
 ```
 
 The connection should fail.
@@ -370,7 +370,7 @@ ssl.key.password=changeit
 Now, this command should succeed. 
 
 ```bash
-bin/kafka-console-consumer.sh --topic downstream --bootstrap-server kafka-upstream.mydomain.com:9093 --consumer.config config/consumer.mtls.properties --from-beginning
+bin/kafka-console-consumer.sh --topic downstream --bootstrap-server kafka-upstream.sitia.nu:9093 --consumer.config config/consumer.mtls.properties --from-beginning
 ```
 
 There might not be any data in Kafka but in that case, the console consumer should be waiting for data to print.
@@ -380,19 +380,19 @@ Now it's time to add the client certificates to AirGap and connect to Kafka with
 
 First, add the topic to Kafka if it doesn't exists.
 ```bash
-bin/kafka-topics.sh --create --topic upstream --bootstrap-server kafka-upstream.mydomain.com:9093 --command-config config/consumer.mtls.properties
+bin/kafka-topics.sh --create --topic upstream --bootstrap-server kafka-upstream.sitia.nu:9093 --command-config config/consumer.mtls.properties
 ```
 
 and the downstream topic too:
 ```bash
-bin/kafka-topics.sh --create --topic downstream --bootstrap-server kafka-upstream.mydomain.com:9093 --command-config config/consumer.mtls.properties
+bin/kafka-topics.sh --create --topic downstream --bootstrap-server kafka-upstream.sitia.nu:9093 --command-config config/consumer.mtls.properties
 ```
 
 
 Then, set the permissions so that `airgap-upstream-client` can read from and write to the `upstream` topic.
 ```bash
 bin/kafka-acls.sh \
-  --bootstrap-server kafka-upstream.mydomain.com:9093 \
+  --bootstrap-server kafka-upstream.sitia.nu:9093 \
   --command-config config/consumer.mtls.properties \
   --add --allow-principal "User:airgap-upstream-client" \
   --operation Write --operation Read --topic upstream
@@ -401,7 +401,7 @@ bin/kafka-acls.sh \
 the `airgap-downstream-client` must be able to write to the `downstream` topic.
 ```bash
 bin/kafka-acls.sh \
-  --bootstrap-server kafka-upstream.mydomain.com:9093 \
+  --bootstrap-server kafka-upstream.sitia.nu:9093 \
   --command-config config/consumer.mtls.properties \
   --add --allow-principal "User:airgap-downstream-client" \
   --operation Write --topic downstream
@@ -410,13 +410,13 @@ bin/kafka-acls.sh \
 
 and check the permissions with:
 ```bash
-bin/kafka-acls.sh --bootstrap-server kafka-upstream.mydomain.com:9093 --command-config config/consumer.mtls.properties --list --topic upstream
+bin/kafka-acls.sh --bootstrap-server kafka-upstream.sitia.nu:9093 --command-config config/consumer.mtls.properties --list --topic upstream
 ```
 
 Now we should be able to use the command line tools to create events in Kafka. Note that if you are using LogGenerator to generate logs in Kafka, that utility doesn't support TLS so you will have to open a plaintext port for that.
 
 ```bash
-bin/kafka-console-consumer.sh --topic upstream --bootstrap-server kafka-upstream.mydomain.com:9093 --consumer.config config/consumer.mtls.properties --from-beginning
+bin/kafka-console-consumer.sh --topic upstream --bootstrap-server kafka-upstream.sitia.nu:9093 --consumer.config config/consumer.mtls.properties --from-beginning
 ```
 
 If the command line tool can access the topic without errors, you can proceed to adding the certificates to air-gap.
@@ -425,12 +425,12 @@ air-gap uses consumer groups and Kafka will neeed ACL:s for those too. The consu
 
 The easiest way here is to add an ACL that accepts all groups:
 ```bash
-bin/kafka-acls.sh --bootstrap-server kafka-upstream.mydomain.com:9093 --command-config config/consumer.mtls.properties --add --allow-principal User:airgap-upstream-client --operation Read --group '*'
+bin/kafka-acls.sh --bootstrap-server kafka-upstream.sitia.nu:9093 --command-config config/consumer.mtls.properties --add --allow-principal User:airgap-upstream-client --operation Read --group '*'
 ```
 
 Or, if you want to be more restrictive, you can use:
 ```bash
-bin/kafka-acls.sh --bootstrap-server kafka-upstream.mydomain.com:9093 --command-config config/consumer.mtls.properties --add --allow-principal User:airgap-upstream-client --operation Read --group test-No-delay
+bin/kafka-acls.sh --bootstrap-server kafka-upstream.sitia.nu:9093 --command-config config/consumer.mtls.properties --add --allow-principal User:airgap-upstream-client --operation Read --group test-No-delay
 ```
 
 Start the upstream air-gap application:
@@ -440,7 +440,7 @@ go run src/upstream/upstream.go config/testcases/upstream-airgap-4.properties
 
 If the upstream topic is empty, you can manually add events with the following command.
 ```bash
-bin/kafka-acls.sh --bootstrap-server kafka-upstream.mydomain.com:9093 --command-config config/consumer.mtls.properties --add --allow-principal User:airgap-upstream-client --operation Read --group '*'
+bin/kafka-acls.sh --bootstrap-server kafka-upstream.sitia.nu:9093 --command-config config/consumer.mtls.properties --add --allow-principal User:airgap-upstream-client --operation Read --group '*'
 ```
 
 Add events and press enter to send them to Kafka. Ctrl-C to stop.
