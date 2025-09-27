@@ -9,7 +9,7 @@ class GapDetectorSerializationTest {
 
     @Test
     void testSerializationAndDeserialization() throws Exception {
-        GapDetector original = new GapDetector(1000, 5);
+        GapDetector original = new GapDetector("test", 1000, 5);
         // Simulate some activity
         original.check(1, null);
         original.check(2, null);

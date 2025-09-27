@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/IBM/sarama"
+	"sitia.nu/airgap/src/logging"
 )
 
 // Sarama configuration options
@@ -25,6 +26,9 @@ var (
 	// TLS configuration
 	tlsConfigParameters *TLSConfiguration = nil
 )
+
+// Logging
+var Logger = logging.Logger
 
 type TLSConfiguration struct {
 	CertFile string
@@ -71,9 +75,9 @@ func createTLSConfig() (*tls.Config, error) {
 // This is called for each sending thread
 // ReadFromKafkaWithContext allows external context cancellation (for SIGHUP reloads)
 func ReadFromKafkaWithContext(ctx context.Context, name string, offsetSeconds int, brokers string, topics string, group string, timestamp string, callbackFunction func(string, []byte, time.Time, []byte) bool) {
-	Logger.Println("Starting a new Sarama consumer (WithContext): " + name + " with offset: " + fmt.Sprintf("%d", offsetSeconds))
+	Logger.Print("Starting a new Sarama consumer (WithContext): " + name + " with offset: " + fmt.Sprintf("%d", offsetSeconds))
 
-	sarama.Logger = Logger
+	sarama.Logger = logging.StdLogger
 
 	version, err := sarama.ParseKafkaVersion(version)
 	if err != nil {
@@ -218,15 +222,11 @@ func (consumer *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, clai
 			}
 			sleepTime := time.Until(message.Timestamp.Add(-consumer.delay))
 			if sleepTime > 0 {
-				if verbose {
-					Logger.Print("Consumer.delay: " + consumer.delay.String())
-					Logger.Print("Delaying message delivery on thread: " + consumer.name + " for " + sleepTime.String())
-				}
+				Logger.Debug("Consumer.delay: " + consumer.delay.String())
+				Logger.Debug("Delaying message delivery on thread: " + consumer.name + " for " + sleepTime.String())
 				time.Sleep(sleepTime)
 			}
-			if verbose {
-				Logger.Printf("Delivering message in thread %s from topic %s: key = %s, value = %s, partition = %d, offset = %d, msgTime = %s\n", consumer.name, message.Topic, string(message.Key), string(message.Value), message.Partition, message.Offset, message.Timestamp)
-			}
+			Logger.Debugf("Delivering message in thread %s from topic %s: key = %s, value = %s, partition = %d, offset = %d, msgTime = %s\n", consumer.name, message.Topic, string(message.Key), string(message.Value), message.Partition, message.Offset, message.Timestamp)
 			id := message.Topic + delimiter +
 				fmt.Sprint(message.Partition) + delimiter +
 				fmt.Sprint(message.Offset)

@@ -5,7 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"sitia.nu/airgap/src/logging"
 )
+
+var Logger = logging.Logger
 
 // Try to assemble a message from the supplied message fragment and
 // earlier received fragments, stored in the message cache

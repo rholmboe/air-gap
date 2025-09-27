@@ -9,22 +9,23 @@ For resend of lost events that gap-detection identifies, a back channel must be 
 
 1. **Clone and build:**
 	```bash
-	git clone <your-repo-url>
+	git clone https://github.com/anders-wartoft/air-gap.git
 	cd air-gap
-	make
+	make all
 	```
+This will build the upstream and downstream binaries as well as the Kafka Streams Java application for deduplication.
 
 2. **Run a local test (no Kafka required):**
-	- Edit `config/upstream3.properties` and `config/downstream3.properties` as needed (set `targetIP` to your local IP).
+	- Edit `config/upstream.properties` and `config/downstream.properties` as needed (set `targetIP` to your local IP).
 	- In one terminal:
 	  ```bash
-	  go run src/downstream/downstream.go config/downstream3.properties
+	  go run src/downstream/downstream.go config/downstream.properties
 	  ```
 	- In another terminal:
 	  ```bash
-	  go run src/upstream/upstream.go config/upstream3.properties
+	  go run src/upstream/upstream.go config/upstream.properties
 	  ```
-	- You should see messages sent and received.
+	- You should see messages received in the first terminal.
 
 3. **Next steps:**
 	- Connect to real Kafka by editing the config files.
@@ -33,7 +34,6 @@ For resend of lost events that gap-detection identifies, a back channel must be 
     - More help for setting up encryption to Kafka can be found here: [Kafka-encryption.md](doc/Kafka-encryption.md)
     - See [Monitoring.md](doc/Monitoring.md) on how to monitor the applications for resource usage etc.
     - To set up reduncancy and/or load balancing, see [Redundancy and Load Balancing.md](doc/Redundancy%20and%20Load%20Balancing.md)
-
 
 
 ## Notation
@@ -56,19 +56,19 @@ The first topic may contain duplicates but the one from the deduplicator should 
 ## Getting started
 ### Very simple use case
 To enable users to get started without Kafka and without hardware diode, use the following properties files:
-- upstream3.properties
-- downstream3.properties
+- upstream.properties
+- downstream.properties
 
-These properties files are configured for getting a few random strings instead of reading from Kafka and to send with UDP without encyption. Change the targetIP in upstream3.properties to the one you would like to send to, and change the targetIP in downstream3.properties to the same value. The IP address must be one that downstrem can bind to and that upstream can send to.
+These properties files are configured for getting a few random strings instead of reading from Kafka and to send with UDP without encyption. Change the targetIP in upstream3.properties to the one you would like to send to. The targetIP in downstream3.properties is set to 0.0.0.0 so it will bind to all local addresses.
 
 In one terminal, start the server with:
 ```
-go run src/downstream/downstream.go config/downstream3.properties
+go run src/downstream/downstream.go config/downstream.properties
 ```
 
 In a new terminal, start the client (sender) with:
 ```
-go run src/upstream/upstream.go config/upstream3.properties
+go run src/upstream/upstream.go config/upstream.properties
 ```
 A few messages should now be sent from upstream and received by downstream. From here, add encryption and connections to Kafka to enable all features.
 
@@ -149,6 +149,7 @@ id=Upstream_1
 nic=en0
 targetIP=127.0.0.1
 targetPort=1234
+source=kafka
 bootstrapServers=192.168.153.138:9092
 topic=transfer
 groupID=test
@@ -183,9 +184,10 @@ export AIRGAP_UPSTREAM_TARGET_IP=255.255.255.255
 | Config file property name | Environment variable name | Default value | Description |
 |--------------------------|--------------------------|---------------|-------------|
 | id                       | AIRGAP_UPSTREAM_ID       |               | Name of the instance. Will be used in logging and when sending status messages |
-| verbose                  | AIRGAP_UPSTREAM_VERBOSE  | false         | true gives extra logging |
+| logLevel                  | AIRGAP_UPSTREAM_LOG_LEVEL  | info         | debug, info, error, warn, fatal |
+| soruce                  | AIRGAP_UPSTREAM_SOURCE  |          | kafka or random |
 | nic                      | AIRGAP_UPSTREAM_NIC      |               | What nic to use for sending to downstream |
-| targetIP                 | AIRGAP_UPSTREAM_TARGET_IP  |               | Downstream air-gap ip address |
+| targetIP                 | AIRGAP_UPSTREAM_TARGET_IP  |               | Downstream air-gap ip address, if IPv6, enclose the address with brackets, like [::1] |
 | targetPort               | AIRGAP_UPSTREAM_TARGET_PORT |               | Downstream air-gap ip port |
 | bootstrapServers         | AIRGAP_UPSTREAM_BOOTSTRAP_SERVERS |               | Bootstrap url for Kafka, with port |
 | topic                    | AIRGAP_UPSTREAM_TOPIC    |               | Topic name in Kafka to read from |
@@ -234,7 +236,7 @@ The property privateKeyFiles should point to one or more private key files that 
 | Config file property name | Environment variable name | Default value | Description |
 |--------------------------|--------------------------|---------------|-------------|
 | id                       | AIRGAP_DOWNSTREAM_ID       |               | Name of the instance. Will be used in logging and when sending status messages |
-| verbose                  | AIRGAP_DOWNSTREAM_VERBOSE  | false         | true gives extra logging |
+| logLevel                  | AIRGAP_DOWNSTREAM_LOG_LEVEL  |          |  debug, info, error, warn, fatal  |
 | nic                      | AIRGAP_DOWNSTREAM_NIC      |               | What nic to use for binding the UDP port |
 | targetIP                 | AIRGAP_DOWNSTREAM_TARGET_IP  |               | Ip address to bind to |
 | targetPort               | AIRGAP_DOWNSTREAM_TARGET_PORT |               | Port to bind to |
@@ -289,7 +291,7 @@ Now we have a compiled file called `upstream`. We can run the application with `
 To turn the application into a service we need to create a service file: `/etc/systemd/system/upstream.service`
 Change the paths to where you will install the service binary and comfiguration file
 
-```properties
+```ini
 [Unit]
 Description=Upstream AirGap service
 ConditionPathExists=/opt/airgap/upstream/bin
@@ -407,6 +409,11 @@ air-gap uses IBM/sarama for the Kafka read/write. For other dependencies, check 
 See LICENSE file
 
 # Release Notes
+
+## 0.1.4-SNAPSHOT
+* Changed the logging for the go applications to include log levels. Monitoring and log updates. 
+* Documented redundancy and load balancing (see doc folder)
+* Documented resend (future updates will implement the new resend algorithm)
 
 ## 0.1.3-SNAPSHOT
 * Added a Kafka Streams Java Application for deduplication and gap detection. Gap detection not finished.

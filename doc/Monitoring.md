@@ -97,12 +97,22 @@ sudo systemctl enable --now metricbeat
 
 The PartitionDedupApp exposes rich runtime information and operations via JMX, thanks to the `JmxSupport` class. You can access these via JConsole, Jolokia, or any JMX client.
 
+
 #### What is Exposed?
-- **GapDetectors MBean** (`nu.sitia.airgap:type=GapDetectors`):
-  - For each partition, exposes:
-    - `<partition>`: Info about the GapDetector for that partition (window stats, offsets, etc.)
-    - `<partition>_gaps`: Current gaps for that partition
-    - Operations: `getAllGaps_<partition>()` and `purge_<partition>()` to fetch or purge gaps for a specific partition
+- **GapDetectors MBean** (per partition):
+  - Each partition is registered as its own MBean:
+    - `nu.sitia.airgap:type=GapDetectors,partition=0`
+    - `nu.sitia.airgap:type=GapDetectors,partition=1`
+    - ...etc.
+  - For each partition MBean, exposes:
+    - `<topic>_<partition>`: Info about the GapDetector for that partition (window stats, offsets, etc.)
+    - `<topic>_<partition>_gaps`: Current gaps for that partition
+    - `<topic>_<partition>_mem`: Estimated memory usage for that partition
+    - `<topic>_<partition>_nrMissing`: Number of missing offsets for that partition
+    - `<topic>_<partition>_nrWindows`: Number of windows for that partition
+    - Operations: `getAllGaps_<topic>_<partition>()` and `purge_<topic>_<partition>()` to fetch or purge gaps for a specific partition
+- **Aggregate GapDetectors MBean** (optional):
+  - `nu.sitia.airgap:type=GapDetectors,partition=-1` provides aggregate stats across all partitions (if enabled in your code).
 - **Props MBean** (`nu.sitia.airgap:type=Props`):
   - All Kafka Streams properties
   - Topics, assigned partitions, window size, max windows, and other runtime config
@@ -114,22 +124,24 @@ The PartitionDedupApp exposes rich runtime information and operations via JMX, t
   3. Browse to `nu.sitia.airgap -> GapDetectors` or `Props` to view attributes and invoke operations.
 - **With Jolokia (for Metricbeat):**
   - The Jolokia agent exposes these MBeans over HTTP. Metricbeat can be configured to scrape specific attributes or call operations.
-  - Example: To fetch all gaps for partition 0, configure Metricbeat's `jolokia.yml` to query the `getAllGaps_0` operation on the `nu.sitia.airgap:type=GapDetectors` MBean.
+
+  - Example: To fetch all gaps for partition 0, configure Metricbeat's `jolokia.yml` to query the `getAllGaps_transfer_0` operation on the `nu.sitia.airgap:type=GapDetectors,partition=0` MBean.
 
 #### Example Jolokia Query (HTTP API)
 To call an operation (e.g., get all gaps for partition 0):
 ```sh
 curl -X POST http://localhost:8778/jolokia/ \
   -H 'Content-Type: application/json' \
-  -d '{"type":"exec","mbean":"nu.sitia.airgap:type=GapDetectors","operation":"getAllGaps_transfer_0"}'
+  -d '{"type":"exec","mbean":"nu.sitia.airgap:type=GapDetectors,partition=0","operation":"getAllGaps_transfer_0"}'
 ```
 To read an attribute (some examples):
 ```sh
 curl http://127.0.0.1:8778/jolokia/read/java.lang:type=Memory
 curl http://localhost:8778/jolokia/list/nu.sitia.airgap
-curl http://localhost:8778/jolokia/read/nu.sitia.airgap:type=GapDetectors/transfer_0
-curl http://localhost:8778/jolokia/read/nu.sitia.airgap:type=GapDetectors/transfer_0_mem
-curl http://localhost:8778/jolokia/read/nu.sitia.airgap:type=GapDetectors/transfer_0_gaps
+curl http://localhost:8778/jolokia/read/nu.sitia.airgap:type=GapDetectors,partition=0/transfer_0
+curl http://localhost:8778/jolokia/read/nu.sitia.airgap:type=GapDetectors,partition=0/transfer_0_mem
+curl http://localhost:8778/jolokia/read/nu.sitia.airgap:type=GapDetectors,partition=0/transfer_0_gaps
+curl http://localhost:8778/jolokia/read/nu.sitia.airgap:type=GapDetectors,partition=0/transfer_0_nrMissing
 curl http://localhost:8778/jolokia/read/nu.sitia.airgap:type=Props
 ```
 
@@ -141,11 +153,13 @@ Add to your `jolokia.yml`:
   hosts: ["http://localhost:8778/jolokia"]
   namespace: "airgap"
   jmx.mappings:
-    - mbean: 'nu.sitia.airgap:type=GapDetectors'
+    - mbean: 'nu.sitia.airgap:type=GapDetectors,partition=0'
       attributes:
-        - attr: 0_gaps
+        - attr: transfer_0_gaps
           field: partition_0_gaps
-        - attr: 1_gaps
+    - mbean: 'nu.sitia.airgap:type=GapDetectors,partition=1'
+      attributes:
+        - attr: transfer_1_gaps
           field: partition_1_gaps
     - mbean: 'nu.sitia.airgap:type=Props'
       attributes:

@@ -2,7 +2,6 @@ package udp
 
 import (
 	"fmt"
-	"log"
 	"net"
 	"strings"
 	// Send a UDP message
@@ -55,12 +54,12 @@ func (u *UDPConn) SendMessages(messages [][]byte) error {
 	if u.conn == nil {
 		return net.ErrClosed
 	}
-	// log.Printf("Sending %d message parts to %s using a single UDP connection\n", len(messages), u.conn.RemoteAddr().String())
+	Logger.Debugf("Sending %d message parts to %s using a single UDP connection\n", len(messages), u.conn.RemoteAddr().String())
 	for i, message := range messages {
-		// log.Printf("Sending message part %d/%d, length %d bytes: %s", i+1, len(messages), len(message), message)
+		Logger.Debugf("Sending message part %d/%d, length %d bytes: %s", i+1, len(messages), len(message), message)
 		_, err := u.conn.Write(message)
 		if err != nil {
-			log.Printf("Error sending message part %d: %v\n", i+1, err)
+			Logger.Errorf("Error sending message part %d: %v\n", i+1, err)
 			if opErr, ok := err.(*net.OpError); ok && opErr.Err != nil {
 				if strings.Contains(opErr.Err.Error(), "connection refused") {
 					return fmt.Errorf("udp-connection-refused: %w", err)

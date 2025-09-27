@@ -1,27 +1,34 @@
 package nu.sitia.airgap.streams;
 
 import nu.sitia.airgap.gapdetector.GapDetector;
+import nu.sitia.airgap.streams.PartitionDedupApp.DedupAndGapProcessor;
 
 import javax.management.*;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.lang.management.ManagementFactory;
 import java.util.*;
 
 public class JmxSupport {
+    private static final Logger LOG = LoggerFactory.getLogger(JmxSupport.class);
+    
     public static class GapDetectorsDynamicMBean implements DynamicMBean {
-        private final Map<String, GapDetector> gapDetectors;
-        public GapDetectorsDynamicMBean(Map<String, GapDetector> gapDetectors) {
-            this.gapDetectors = gapDetectors;
+        private final DedupAndGapProcessor processor;
+        public GapDetectorsDynamicMBean(DedupAndGapProcessor processor) {
+            this.processor = processor;
         }
         @Override
         public Object invoke(String actionName, Object[] params, String[] signature) throws MBeanException, ReflectionException {
+            Map<String, GapDetector> gapDetectors = processor.getGapDetectors();
             // Partition-specific operations: getAllGaps_<partition> and purge_<partition>
             if (actionName.startsWith("getAllGaps_")) {
                 String key = actionName.substring("getAllGaps_".length());
-                GapDetector gd = gapDetectors.get(key);
+                GapDetector gd = gapDetectors.get(key);                
                 if (gd == null) return "Not found";
                 try {
-                    java.util.List<?> gaps = gd.getAllGaps();
+                    java.util.List<?> gaps = gd.getAllCompactGaps();
                     return gaps.toString();
                 } catch (Exception e) {
                     throw new MBeanException(e, "Failed to getAllGaps for key: " + key);
@@ -42,18 +49,34 @@ public class JmxSupport {
         }
         @Override
         public Object getAttribute(String attribute) throws AttributeNotFoundException {
+            Map<String, GapDetector> gapDetectors = processor.getGapDetectors();
+
             // Support per-partition info, per-partition gaps, and per-partition memory as attributes
             if (attribute.endsWith("_gaps")) {
                 String base = attribute.substring(0, attribute.length() - 5);
                 GapDetector gd = gapDetectors.get(base);
                 if (gd == null) throw new AttributeNotFoundException(attribute);
-                return gd.getAllGaps().toString();
+                String result = gd.getAllCompactGaps().toString();
+                LOG.info("Gaps for {}: {}", base, result);
+                return result;
             }
             if (attribute.endsWith("_mem")) {
                 String base = attribute.substring(0, attribute.length() - 4);
                 GapDetector gd = gapDetectors.get(base);
                 if (gd == null) throw new AttributeNotFoundException(attribute);
                 return gd.estimateMemoryBytes();
+            }
+            if (attribute.endsWith("_nrMissing")) {
+                String base = attribute.substring(0, attribute.length() - 10);
+                GapDetector gd = gapDetectors.get(base);
+                if (gd == null) throw new AttributeNotFoundException(attribute);
+                return gd.getMissingCounts();
+            }
+            if (attribute.endsWith("_nrWindows")) {
+                String base = attribute.substring(0, attribute.length() - 10);
+                GapDetector gd = gapDetectors.get(base);
+                if (gd == null) throw new AttributeNotFoundException(attribute);
+                return gd.listWindows().size();
             }
             GapDetector gd = gapDetectors.get(attribute);
             if (gd == null) throw new AttributeNotFoundException(attribute);
@@ -96,19 +119,33 @@ public class JmxSupport {
         @Override
         public MBeanInfo getMBeanInfo() {
             // Always regenerate the attribute list so JMX console refresh shows new gapdetectors
+            Map<String, GapDetector> gapDetectors = processor.getGapDetectors();
             java.util.List<MBeanAttributeInfo> attrList = new java.util.ArrayList<>();
             if (gapDetectors.isEmpty()) {
                 attrList.add(new MBeanAttributeInfo("NoGapDetectors", "java.lang.String", "No GapDetectors registered yet", true, false, false));
             } else {
                 for (String name : gapDetectors.keySet()) {
+                    String[] parts = name.split("_");
+                    String detectorPartition = parts[1];
+                    long partition = Long.parseLong(detectorPartition);
+                    if (processor.getPartition() != partition) {
+                        continue;
+                    }
                     attrList.add(new MBeanAttributeInfo(name, "java.lang.String", "GapDetector info for " + name, true, false, false));
                     attrList.add(new MBeanAttributeInfo(name + "_gaps", "java.lang.String", "Gaps for " + name, true, false, false));
                     attrList.add(new MBeanAttributeInfo(name + "_mem", "java.lang.Long", "Estimated memory usage (bytes) for all loaded windows in " + name, true, false, false));
+                    attrList.add(new MBeanAttributeInfo(name + "_nrMissing", "java.lang.Long", "Number of missing offsets detected in " + name, true, false, false));
+                    attrList.add(new MBeanAttributeInfo(name + "_nrWindows", "java.lang.Long", "Number of windows in " + name, true, false, false));
                 }
             }
             // Dynamically create one operation per partition for getAllGaps and purge
             java.util.List<MBeanOperationInfo> opList = new java.util.ArrayList<>();
             for (String name : gapDetectors.keySet()) {
+                String detectorPartition = name.split("_")[1];
+                long partition = Long.parseLong(detectorPartition);
+                if (processor.getPartition() != partition) {
+                    continue;
+                }
                 opList.add(new MBeanOperationInfo(
                     "getAllGaps_" + name,
                     "Show gaps for " + name,
@@ -140,14 +177,16 @@ public class JmxSupport {
         private final String rawTopic;
         private final String cleanTopic;
         private final String gapTopic;
+        private final String applicationId;
         private final java.util.Set<Integer> assignedRawPartitions;
         private final long windowSize;
         private final int maxWindows;
-        public PropsDynamicMBean(Properties props, String rawTopic, String cleanTopic, String gapTopic, java.util.Set<Integer> assignedRawPartitions, long windowSize, int maxWindows) {
+        public PropsDynamicMBean(Properties props, String rawTopic, String cleanTopic, String gapTopic, String applicationId, java.util.Set<Integer> assignedRawPartitions, long windowSize, int maxWindows) {
             this.props = props;
             this.rawTopic = rawTopic;
             this.cleanTopic = cleanTopic;
             this.gapTopic = gapTopic;
+            this.applicationId = applicationId;
             this.assignedRawPartitions = assignedRawPartitions;
             this.windowSize = windowSize;
             this.maxWindows = maxWindows;
@@ -191,6 +230,9 @@ public class JmxSupport {
             if ("GAP_EMIT_INTERVAL_SEC".equals(attribute)) {
                 return String.valueOf(PartitionDedupApp.GAP_EMIT_INTERVAL_SEC);
             }
+            if ("APPLICATION_ID".equals(attribute)) {
+                return applicationId;
+            }
             throw new AttributeNotFoundException(attribute);
         }
         @Override
@@ -233,6 +275,7 @@ public class JmxSupport {
             attrList.add(new MBeanAttributeInfo("PERSIST_INTERVAL_MS", "java.lang.String", "GapDetector persist interval (ms)", true, false, false));
             attrList.add(new MBeanAttributeInfo("GAP_EMIT_INTERVAL_SEC", "java.lang.String", "Gap emit interval (seconds)", true, false, false));
             attrList.add(new MBeanAttributeInfo("assignedRawPartitions", "java.lang.String", "Partitions assigned to this instance for the raw topic", true, false, false));
+            attrList.add(new MBeanAttributeInfo("APPLICATION_ID", "java.lang.String", "Kafka Streams application.id", true, false, false));
 
             return new MBeanInfo(
                 this.getClass().getName(),
@@ -245,44 +288,40 @@ public class JmxSupport {
         }
     }
 
-    private static GapDetectorsDynamicMBean gapDetectorsMBeanInstance = null;
-    private static final ObjectName gapDetectorsName;
-    static {
-        ObjectName tmp = null;
-        try {
-            tmp = new ObjectName("nu.sitia.airgap:type=GapDetectors");
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-        gapDetectorsName = tmp;
-    }
 
-    public static synchronized void registerGapDetectorsMBean(Map<String, GapDetector> gapDetectors) {
+    public static synchronized void registerProcessorMBean(DedupAndGapProcessor processor) {
+        int partition = processor.getPartition();
+        if (partition == -1) {
+            LOG.info("Skipping registration of GapDetectors MBean for uninitialized partition (-1)");
+            return;
+        }
         try {
             MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
-            // Always unregister first if already registered
-            if (mbs.isRegistered(gapDetectorsName)) {
+            ObjectName name = new ObjectName("nu.sitia.airgap:type=GapDetectors,partition=" + partition);
+            // Always unregister first if already registered for this partition
+            if (mbs.isRegistered(name)) {
                 try {
-                    mbs.unregisterMBean(gapDetectorsName);
+                    mbs.unregisterMBean(name);
                 } catch (Exception ignored) {}
             }
-            gapDetectorsMBeanInstance = new GapDetectorsDynamicMBean(gapDetectors);
-            mbs.registerMBean(gapDetectorsMBeanInstance, gapDetectorsName);
+            GapDetectorsDynamicMBean mbean = new GapDetectorsDynamicMBean(processor);
+            mbs.registerMBean(mbean, name);
+            LOG.info("Registered GapDetectors MBean for partition {} as {}", partition, name);
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
-    // Call this whenever a new gap detector is added
-    public static synchronized void refreshGapDetectorsMBean(Map<String, GapDetector> gapDetectors) {
-        registerGapDetectorsMBean(gapDetectors);
-    }
+    // // Call this whenever a new gap detector is added
+    // public static synchronized void refreshGapDetectorsMBean(Map<String, GapDetector> gapDetectors) {
+    //     registerGapDetectorsMBean(gapDetectors);
+    // }
 
-    public static void registerPropsMBean(Properties props, String rawTopic, String cleanTopic, String gapTopic, java.util.Set<Integer> assignedRawPartitions, long windowSize, int maxWindows) {
+    public static void registerPropsMBean(Properties props, String rawTopic, String cleanTopic, String gapTopic, String applicationId, java.util.Set<Integer> assignedRawPartitions, long windowSize, int maxWindows) {
         try {
             MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
             ObjectName propsName = new ObjectName("nu.sitia.airgap:type=Props");
-            PropsDynamicMBean propsMBean = new PropsDynamicMBean(props, rawTopic, cleanTopic, gapTopic, assignedRawPartitions, windowSize, maxWindows);
+            PropsDynamicMBean propsMBean = new PropsDynamicMBean(props, rawTopic, cleanTopic, gapTopic, applicationId, assignedRawPartitions, windowSize, maxWindows);
             if (!mbs.isRegistered(propsName)) {
                 mbs.registerMBean(propsMBean, propsName);
             }

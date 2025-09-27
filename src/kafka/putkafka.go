@@ -120,10 +120,10 @@ func DoWriteToKafka(messageKey string, topics string, partition int32, message [
 		Value:     sarama.StringEncoder(message),
 		Partition: partition,
 	}
-	Logger.Printf("Sending message with key %s to Kafka topic %s partition %d\n", messageKey, topics, partition)
+	Logger.Debugf("Sending message with key %s to Kafka topic %s partition %d\n", messageKey, topics, partition)
 
 	if msg.Partition != partition {
-		Logger.Printf("WARNING: Partition mismatch before send! msg.Partition=%d, requested=%d", msg.Partition, partition)
+		Logger.Warnf("Partition mismatch before send! msg.Partition=%d, requested=%d", msg.Partition, partition)
 	}
 	producer.Input() <- msg
 }

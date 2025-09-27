@@ -4,7 +4,6 @@ import (
 	"crypto/md5"
 	"encoding/binary"
 	"encoding/hex"
-	"log"
 	"time"
 )
 
@@ -28,7 +27,7 @@ func NrMessages(mtu uint16, id string, message []byte) uint16 {
 	var nrMsgs = 1 + int32(len(message))/int32(payloadLength)
 	if nrMsgs != int32(uint16(nrMsgs)) {
 		// This message will not be delivered.
-		log.Printf("This message will not be delivered. Max 65535 messages are allowed for each message.")
+		Logger.Error("This message will not be delivered. Max 65535 parts are allowed for each message.")
 	}
 	return (uint16)(nrMsgs)
 }
@@ -115,7 +114,7 @@ func FormatMessage(messageType uint8, id string, message []byte, mtu uint16) [][
 		var remainingLength int32 = int32(mtu) - 13 - int32(len(id))
 
 		if remainingLength < 0 {
-			log.Panic("Error. The Header is longer than the MTU.")
+			Logger.Panicf("Error. The Header is longer than the MTU.")
 		}
 		var payload []byte = []byte{}
 		var checksum string

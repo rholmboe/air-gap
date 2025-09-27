@@ -19,15 +19,18 @@ package filter
 
 import (
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
+
+	"sitia.nu/airgap/src/logging"
 )
 
 type Filter struct {
 	groups [][]int64
 	k      int64
 }
+
+var Logger = logging.Logger
 
 func NewFilter(config string) (*Filter, error) {
 	parts := strings.Split(config, ",")
@@ -48,14 +51,14 @@ func NewFilter(config string) (*Filter, error) {
 
 	k := groups[1][0] - groups[0][0]
 	if groups[2][0] != groups[1][0]+k {
-		log.Fatalf("The third group starts with an unexpected number. Got %d but expected %d",
+		Logger.Fatalf("The third group starts with an unexpected number. Got %d but expected %d",
 			groups[2][0], groups[1][0]+k)
 	}
 	e := doSelfTest(groups, k)
 	if e != nil {
-		log.Fatalf("The self test of the expression %s failed with error: %v", config, e)
+		Logger.Fatalf("The self test of the expression %s failed with error: %v", config, e)
 	} else {
-		log.Printf("Self test of the expression ok")
+		Logger.Printf("Self test of the expression ok")
 	}
 	return &Filter{
 		groups: groups,
@@ -100,10 +103,10 @@ func doSelfTest(groups [][]int64, k int64) error {
 	for i := 0; i < largestNumber; i++ {
 		valid := isValidNumber(int64(i), groups, k) // Convert i to int64
 		isInGroups := inGroup(int64(i), groups)     // Convert i to int64
-		log.Printf("%d: isValid returned %v inGroup returned %v",
+		Logger.Printf("%d: isValid returned %v inGroup returned %v",
 			i, valid, isInGroups)
 		if valid != isInGroups {
-			log.Printf("%d: isValid returned %v inGroup returned %v",
+			Logger.Printf("%d: isValid returned %v inGroup returned %v",
 				i, valid, isInGroups)
 			return fmt.Errorf("self test failed for %d: isValid returned %v, inGroup returned %v",
 				i, valid, isInGroups)
@@ -121,11 +124,11 @@ func doSelfTest(groups [][]int64, k int64) error {
 func main() {
 	f, err := NewFilter("2,3,22,23,42,43")
 	if err != nil {
-		log.Fatalf("Error creating filter: %v", err)
+		Logger.Fatalf("Error creating filter: %v", err)
 	}
 
 	from := int64(23413421342141234)
 	for i := from; i < 20+from; i++ {
-		log.Printf("%d -> %v", i, f.Check(i))
+		Logger.Printf("%d -> %v", i, f.Check(i))
 	}
 }

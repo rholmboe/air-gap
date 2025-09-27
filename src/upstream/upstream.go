@@ -10,17 +10,17 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"sitia.nu/airgap/src/filter"
 	"sitia.nu/airgap/src/kafka"
-	"sitia.nu/airgap/src/logfile"
+	"sitia.nu/airgap/src/logging"
 	"sitia.nu/airgap/src/mtu"
 	"sitia.nu/airgap/src/protocol"
 	"sitia.nu/airgap/src/udp"
@@ -42,8 +42,8 @@ type TransferConfiguration struct {
 	newkey                       []byte           // a new symmetric key, when successfully sent, copy the value to key
 	publicKey                    *rsa.PublicKey   // public key for encrypting the symmetric key
 	publicKeyFile                string           // file with the public key
+	source                       string           // source of the messages, kafka or random
 	generateNewSymmetricKeyEvery int              // seconds between key generation
-	verbose                      bool             // verbose output
 	logFileName                  string           // log file name, redirect logging to a file from the console
 	sendingThreads               []map[string]int // array of objects with thread names and offsets
 	certFile                     string           // Certificate to use to communicate with Kafka with TLS
@@ -51,16 +51,29 @@ type TransferConfiguration struct {
 	caFile                       string           // CA file to use for TLS
 	deliverFilter                string           // filter configuration
 	filter                       *filter.Filter   // filter instance
+	eps                          float64          // events per second
+	logLevel                     string           // log level: DEBUG, INFO, WARN, ERROR, FATAL
+	logStatistics                int32            // log statistics every n seconds, 0 means no logging
 }
 
 var config TransferConfiguration
 var nextKeyGeneration time.Time
 var keepRunning bool = true
 
+// Log counters
+var receivedEvents int64
+var sentEvents int64
+var totalReceived int64
+var totalSent int64
+var timeStart int64
+
 // Start by logging to the console. If a log file is specified in the configuration file, use that
 // instead. The log file will be created if it doesn't exist, and appended to if it does.
 // Any errors creating the log file will be reported to the console.
-var Logger = log.New(os.Stdout, "", log.LstdFlags)
+var Logger = logging.Logger
+
+// BuildNumber is set at build time via -ldflags
+var BuildNumber = "dev"
 
 // Create a new symmetric key for the encryption.
 func createNewKey() []byte {
@@ -109,7 +122,7 @@ func readPublicKey(fileName string) *rsa.PublicKey {
 
 func defaultConfiguration() TransferConfiguration {
 	config := TransferConfiguration{}
-	config.verbose = false
+	config.logLevel = "INFO"
 	config.encryption = false
 	config.id = "default_upstream"
 	config.logFileName = ""
@@ -117,6 +130,8 @@ func defaultConfiguration() TransferConfiguration {
 	config.sendingThreads = []map[string]int{
 		{"now": 0},
 	}
+	config.eps = -1          // default: no throttle
+	config.logStatistics = 0 // default: no statistics
 	return config
 }
 
@@ -148,6 +163,14 @@ func readParameters(fileName string, result TransferConfiguration) (TransferConf
 		value := strings.TrimSpace(parts[1])
 
 		switch key {
+		case "eps":
+			tmp, err := strconv.ParseFloat(value, 64)
+			if err != nil {
+				Logger.Fatalf("Error in config eps. Illegal value: %s. Legal values are float >= -1", value)
+			} else {
+				result.eps = tmp
+				Logger.Printf("eps: %f", tmp)
+			}
 		case "id":
 			result.id = value
 			Logger.Printf("id: %s", value)
@@ -198,20 +221,16 @@ func readParameters(fileName string, result TransferConfiguration) (TransferConf
 		case "publicKeyFile":
 			result.publicKeyFile = value
 			Logger.Printf("publicKeyFile: %s", value)
-		case "verbose":
-			tmp, err := strconv.ParseBool(value)
-			if err != nil {
-				Logger.Fatalf("Error in config verbose. Illegal value: %s. Legal values are true or false", value)
+		case "source":
+			if value == "kafka" || value == "random" {
+				result.source = value
 			} else {
-				result.verbose = tmp
+				Logger.Fatalf("Unknown source %s. Legal values are 'kafka' or 'random'.", value)
 			}
-			var verboseStr string
-			if result.verbose {
-				verboseStr = "true"
-			} else {
-				verboseStr = "false"
-			}
-			Logger.Printf("verbose: %s", verboseStr)
+			Logger.Printf("source: %s", value)
+		case "logLevel":
+			result.logLevel = strings.ToUpper(value)
+			Logger.Printf("logLevel: %s", result.logLevel)
 		case "encryption":
 			tmp, err := strconv.ParseBool(value)
 			if err != nil {
@@ -259,14 +278,28 @@ func readParameters(fileName string, result TransferConfiguration) (TransferConf
 		case "deliverFilter":
 			result.deliverFilter = value
 			Logger.Printf("deliverFilter: %s", value)
+		case "logStatistics":
+			tmp, err := strconv.Atoi(value)
+			if err != nil {
+				Logger.Fatalf("Error in config logStatistics. Illegal value: %s. Legal values are a non-negative integer", value)
+			} else {
+				if tmp < 0 {
+					Logger.Fatalf("Error in config logStatistics. Illegal value: %s. Legal values are a non-negative integer", value)
+				} else {
+					result.logStatistics = int32(tmp)
+					Logger.Printf("logStatistics: %d", result.logStatistics)
+				}
+			}
 		}
 	}
 
-	// Check the sending threads
-	if len(result.sendingThreads) == 0 {
-		Logger.Print("No sendingThreads found. Adding default: sendingThreads: [{'now': 0}]")
-		result.sendingThreads = []map[string]int{
-			{"now": 0},
+	if result.source == "kafka" {
+		// Check the sending threads
+		if len(result.sendingThreads) == 0 {
+			Logger.Print("No sendingThreads found. Adding default: sendingThreads: [{'now': 0}]")
+			result.sendingThreads = []map[string]int{
+				{"now": 0},
+			}
 		}
 	}
 
@@ -278,9 +311,16 @@ func readParameters(fileName string, result TransferConfiguration) (TransferConf
 }
 
 func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
-	Logger.Print("Checking configuration from environment variables...")
 
+	Logger.Print("Checking configuration from environment variables...")
 	prefix := "AIRGAP_UPSTREAM_"
+	if eps := os.Getenv(prefix + "EPS"); eps != "" {
+		if epsFloat, err := strconv.ParseFloat(eps, 64); err == nil {
+			Logger.Print("Overriding eps with environment variable: " + prefix + "EPS" + " with value: " + eps)
+			config.eps = epsFloat
+		}
+	}
+
 	if id := os.Getenv(prefix + "ID"); id != "" {
 		Logger.Print("Overriding id with environment variable: " + prefix + "ID" + " with value: " + id)
 		config.id = id
@@ -340,9 +380,9 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 			config.generateNewSymmetricKeyEvery = generateNewSymmetricKeyEveryInt
 		}
 	}
-	if verbose := os.Getenv(prefix + "VERBOSE"); verbose != "" {
-		Logger.Print("Overriding verbose with environment variable: " + prefix + "VERBOSE" + " with value: " + verbose)
-		config.verbose = verbose == "true"
+	if logLevel := os.Getenv(prefix + "LOG_LEVEL"); logLevel != "" {
+		Logger.Print("Overriding logLevel with environment variable: " + prefix + "LOG_LEVEL" + " with value: " + logLevel)
+		config.logLevel = logLevel
 	}
 	if logFileName := os.Getenv(prefix + "LOG_FILE_NAME"); logFileName != "" {
 		Logger.Print("Overriding logFileName with environment variable: " + prefix + "LOG_FILE_NAME" + " with value: " + logFileName)
@@ -351,7 +391,7 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 	if sendingThreads := os.Getenv(prefix + "SENDING_THREADS"); sendingThreads != "" {
 		Logger.Print("Overriding sendingThreads with environment variable: " + prefix + "SENDING_THREADS" + " with value: " + sendingThreads)
 		if err := json.Unmarshal([]byte(sendingThreads), &config.sendingThreads); err != nil {
-			Logger.Fatalln("Error parsing SENDING_THREADS:", err)
+			Logger.Fatalf("Error parsing SENDING_THREADS:", err)
 		}
 	}
 	if certFile := os.Getenv(prefix + "CERT_FILE"); certFile != "" {
@@ -366,9 +406,19 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 		Logger.Print("Overriding caFile with environment variable: " + prefix + "CA_FILE" + " with value: " + caFile)
 		config.caFile = caFile
 	}
+	if source := os.Getenv(prefix + "SOURCE"); source != "" {
+		Logger.Print("Overriding source with environment variable: " + prefix + "SOURCE" + " with value: " + source)
+		config.source = source
+	}
 	if deliverFilter := os.Getenv(prefix + "DELIVER_FILTER"); deliverFilter != "" {
 		Logger.Print("Overriding deliverFilter with environment variable: " + prefix + "DELIVER_FILTER" + " with value: " + deliverFilter)
 		config.deliverFilter = deliverFilter
+	}
+	if logStatistics := os.Getenv(prefix + "LOG_STATISTICS"); logStatistics != "" {
+		if logStatisticsInt, err := strconv.Atoi(logStatistics); err == nil {
+			Logger.Print("Overriding logStatistics with environment variable: " + prefix + "LOG_STATISTICS" + " with value: " + logStatistics)
+			config.logStatistics = int32(logStatisticsInt)
+		}
 	}
 
 	return config
@@ -397,21 +447,25 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 			Logger.Fatalf("Cannot write to log file '%s': %v", result.logFileName, err)
 		}
 	}
+	if result.source != "kafka" && result.source != "random" {
+		Logger.Fatalf("Unknown source %s. Legal values are 'kafka' or 'random'.", result.source)
+	}
 	if result.targetIP == "" {
 		Logger.Fatal("Missing required configuration: targetIP")
 	}
 	if result.targetPort < 0 || result.targetPort > 65535 {
 		Logger.Fatal("Invalid configuration: targetPort must be between 0 and 65535")
 	}
-	if result.bootstrapServers == "" {
-		Logger.Fatal("Missing required configuration: bootstrapServers")
-
-	}
-	if result.topic == "" {
-		Logger.Fatal("Missing required configuration: topic")
-	}
-	if result.groupID == "" {
-		Logger.Fatal("Missing required configuration: groupID")
+	if result.source == "kafka" {
+		if result.bootstrapServers == "" {
+			Logger.Fatal("Missing required configuration: bootstrapServers")
+		}
+		if result.topic == "" {
+			Logger.Fatal("Missing required configuration: topic")
+		}
+		if result.groupID == "" {
+			Logger.Fatal("Missing required configuration: groupID")
+		}
 	}
 	if result.publicKeyFile != "" {
 		// Check that the name is a valid file name and that we can open and read from that file
@@ -425,9 +479,17 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 			Logger.Fatalf("Cannot read from public key file '%s': %v", result.publicKeyFile, err)
 		}
 	}
-
-	if result.verbose {
-		Logger.Printf("verbose: %t", result.verbose)
+	if result.source != "kafka" && result.source != "random" {
+		Logger.Fatalf("Unknown source %s. Legal values are 'kafka' or 'random'.", result.source)
+	}
+	if result.logLevel != "" {
+		Logger.SetLogLevel(result.logLevel)
+		var tmp = Logger.GetLogLevel()
+		if (tmp == result.logLevel) == false {
+			Logger.Fatalf("Error in config logLevel. Illegal value: %s. Legal values are DEBUG, INFO, WARN, ERROR, FATAL", result.logLevel)
+		} else {
+			Logger.Printf("logLevel: %s", tmp)
+		}
 	}
 	if result.encryption {
 		Logger.Printf("encryption: %t", result.encryption)
@@ -468,7 +530,7 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 			Logger.Fatalf("Error in deliverFilter: %v", err)
 		}
 		Logger.Printf("Filtering is enabled with configuration: %s", result.deliverFilter)
-		Logger.Print("config.filter is ", result.filter)
+		Logger.Printf("config.filter is ", result.filter)
 	} else {
 		result.filter = nil
 		Logger.Printf("No filtering is enabled.")
@@ -480,7 +542,8 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Printf("Configuration:")
 	Logger.Printf("  id: %s", config.id)
 	Logger.Printf("  nic: %s", config.nic)
-	Logger.Printf("  verbose: %t", config.verbose)
+	Logger.Printf("  logLevel: %s", config.logLevel)
+	Logger.Printf("  logFileName: %s", config.logFileName)
 	Logger.Printf("  targetIP: %s", config.targetIP)
 	Logger.Printf("  targetPort: %d", config.targetPort)
 	Logger.Printf("  bootstrapServers: %s", config.bootstrapServers)
@@ -492,6 +555,9 @@ func logConfiguration(config TransferConfiguration) {
 	if config.publicKeyFile != "" {
 		Logger.Printf("  publicKeyFile: %s", config.publicKeyFile)
 	}
+	Logger.Printf("  source: %s", config.source)
+	Logger.Printf("  eps: %f", config.eps)
+
 	Logger.Printf("  generateNewSymmetricKeyEvery: %d seconds", config.generateNewSymmetricKeyEvery)
 	if len(config.sendingThreads) > 0 {
 		for i, thread := range config.sendingThreads {
@@ -504,6 +570,7 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Printf("  keyFile: %s", config.keyFile)
 	Logger.Printf("  caFile: %s", config.caFile)
 	Logger.Printf("  deliverFilter: %s", config.deliverFilter)
+	Logger.Printf("  logStatistics: %d seconds", config.logStatistics)
 }
 
 // Generate a new symmetric key and encrypt the key with the
@@ -572,6 +639,7 @@ func sendNewKey(conn *udp.UDPConn) {
 func main() {
 	var conn *udp.UDPConn
 	Logger.Printf("Upstream version: %s starting up...", version.GitVersion)
+	Logger.Printf("Build number: %s", BuildNumber)
 	fileName := ""
 	if len(os.Args) > 2 {
 		Logger.Fatal("Too many command line parameters. Only one parameter is allowed: the configuration file.")
@@ -588,6 +656,8 @@ func main() {
 	var cancel context.CancelFunc
 	var ctx context.Context
 
+	// Set time_start at app start
+	timeStart = time.Now().Unix()
 	reload := func() {
 		// Start with the default parameters
 		configuration := defaultConfiguration()
@@ -606,14 +676,42 @@ func main() {
 
 		// Set the log file name
 		if config.logFileName != "" {
-			Logger.Println("Configuring log to: " + config.logFileName)
-			err := logfile.SetLogFile(config.logFileName, Logger)
+			Logger.Print("Configuring log to: " + config.logFileName)
+			err := Logger.SetLogFile(config.logFileName)
 			if err != nil {
 				Logger.Fatal(err)
 			}
 			Logger.Printf("Upstream version: %s", version.GitVersion)
-			Logger.Println("Log to file started up")
-			kafka.SetLogger(Logger)
+			Logger.Print("Log to file started up")
+		}
+
+		// Start statistics logger if enabled
+		if config.logStatistics > 0 {
+			go func() {
+				Logger.Debugf("Setting up statistics logger with interval %d seconds", config.logStatistics)
+				interval := time.Duration(config.logStatistics) * time.Second
+				for {
+					time.Sleep(interval)
+					recv := atomic.SwapInt64(&receivedEvents, 0)
+					sent := atomic.SwapInt64(&sentEvents, 0)
+					totalRecv := atomic.LoadInt64(&totalReceived)
+					totalSnt := atomic.LoadInt64(&totalSent)
+					stats := map[string]any{
+						"id":             config.id,
+						"time":           time.Now().Unix(),
+						"time_start":     timeStart,
+						"interval":       config.logStatistics,
+						"received":       recv,
+						"sent":           sent,
+						"total_received": totalRecv,
+						"total_sent":     totalSnt,
+					}
+					if Logger.CanLog(logging.INFO) {
+						b, _ := json.Marshal(stats)
+						Logger.Info("STATISTICS: " + string(b))
+					}
+				}
+			}()
 		}
 
 		// Now log the complete configuration to stdout or file
@@ -685,28 +783,25 @@ func main() {
 		// Closure for Kafka message handler, captures conn
 		// id := message.Topic + delimiter + message.Partition + delimiter + message.Offset
 		kafkaHandler := func(id string, key []byte, t time.Time, received []byte) bool {
+			atomic.AddInt64(&receivedEvents, 1)
+			atomic.AddInt64(&totalReceived, 1)
 			// Filter:
 			if config.filter != nil {
-				if config.verbose {
-					Logger.Printf("Filter applied for message with id: %s", id)
-				}
+				Logger.Debugf("Filter applied for message with id: %s", id)
+
 				// Get the message key parts:
 				parts := strings.Split(id, "_")
 				if len(parts) == 3 {
 					offset, err := strconv.ParseInt(parts[2], 10, 64)
 					if err == nil {
 						if !config.filter.Check(offset) {
-							if config.verbose {
-								Logger.Printf("Filtering out message with id: %s and content: %s", id, string(received))
-							}
+							Logger.Debugf("Filtering out message with id: %s and content: %s", id, string(received))
 							return keepRunning
 						}
 					}
 				}
 			} else {
-				if config.verbose {
-					Logger.Printf("No filter applied for message with id: %s", id)
-				}
+				Logger.Debugf("No filter applied for message with id: %s", id)
 			}
 			var messages [][]byte
 			// Logger.Println("handleKafkaMessage called with message byte array length: ", len(received))
@@ -718,30 +813,32 @@ func main() {
 			} else {
 				messages = protocol.FormatMessage(protocol.TYPE_CLEARTEXT, id, received, config.mtu)
 			}
-			if config.verbose {
-				Logger.Println(id + " - " + string(received))
-			}
+			Logger.Debugf("%s - %s", id, string(received))
 			if err != nil {
-				Logger.Println(err)
+				Logger.Error(err)
 			}
 			udpErr := conn.SendMessages(messages)
+			if udpErr == nil {
+				atomic.AddInt64(&sentEvents, int64(len(messages)))
+				atomic.AddInt64(&totalSent, int64(len(messages)))
+			}
 			if udpErr != nil {
 				if strings.Contains(udpErr.Error(), "udp-connection-refused") || strings.Contains(udpErr.Error(), "udp-connection-closed") {
-					Logger.Printf("UDP connection error detected in Kafka handler, attempting to recreate connection: %v", udpErr)
+					Logger.Errorf("UDP connection error detected in Kafka handler, attempting to recreate connection: %v", udpErr)
 					conn.Close()
 					conn, err = udp.NewUDPConn(fmt.Sprintf("%s:%d", config.targetIP, config.targetPort))
 					if err != nil {
-						Logger.Printf("Error recreating UDP connection: %v", err)
+						Logger.Errorf("Error recreating UDP connection: %v", err)
 					} else {
 						Logger.Printf("UDP connection recreated successfully in Kafka handler.")
 						// Try sending again
 						udpErr = conn.SendMessages(messages)
 						if udpErr != nil {
-							Logger.Printf("Error after UDP reconnect in Kafka handler: %v", udpErr)
+							Logger.Errorf("Error after UDP reconnect in Kafka handler: %v", udpErr)
 						}
 					}
 				} else {
-					Logger.Printf("Error sending UDP messages: %v", udpErr)
+					Logger.Errorf("Error sending UDP messages: %v", udpErr)
 				}
 			}
 			if config.encryption && config.generateNewSymmetricKeyEvery > 0 {
@@ -755,23 +852,67 @@ func main() {
 		}
 
 		// Now, read from Kafka and call our handler for each message, or generate random messages for test purposes
-		Logger.Printf("Reading from Kafka %s", config.bootstrapServers)
-		kafka.SetVerbose(config.verbose)
-		// Check if we have TLS to Kafka
-		if configuration.certFile != "" || configuration.keyFile != "" || configuration.caFile != "" {
-			Logger.Print("Using TLS for Kafka")
-			kafka.SetTLSConfigParameters(configuration.certFile, configuration.keyFile, configuration.caFile)
-		}
+		if config.source == "kafka" {
+			Logger.Printf("Reading from Kafka %s", config.bootstrapServers)
+			// Check if we have TLS to Kafka
+			if configuration.certFile != "" || configuration.keyFile != "" || configuration.caFile != "" {
+				Logger.Print("Using TLS for Kafka")
+				kafka.SetTLSConfigParameters(configuration.certFile, configuration.keyFile, configuration.caFile)
+			}
 
-		// Spawn one thread for each entry in config.sendingThreads
-		for _, thread := range config.sendingThreads {
-			go func(thread map[string]int) {
-				for name, offset := range thread {
-					Logger.Printf("Starting sending thread: %s (offset: %d)", name, offset)
-					group := fmt.Sprintf("%s-%s", config.groupID, name)
-					kafka.ReadFromKafkaWithContext(ctx, name, offset, config.bootstrapServers, config.topic, group, config.from, kafkaHandler)
+			// Spawn one thread for each entry in config.sendingThreads
+			for _, thread := range config.sendingThreads {
+				go func(thread map[string]int) {
+					// EPS limiter: per-thread
+					var lastEmit time.Time
+					for name, offset := range thread {
+						Logger.Printf("Starting sending thread: %s (offset: %d)", name, offset)
+						group := fmt.Sprintf("%s-%s", config.groupID, name)
+						// Wrap kafkaHandler with EPS limiter
+						rateLimitedHandler := func(id string, key []byte, t time.Time, received []byte) bool {
+							if config.eps > 0 {
+								now := time.Now()
+								if !lastEmit.IsZero() {
+									elapsed := now.Sub(lastEmit)
+									minInterval := time.Duration(float64(time.Second) / config.eps)
+									if elapsed < minInterval {
+										time.Sleep(minInterval - elapsed)
+									}
+								}
+								lastEmit = time.Now()
+							}
+							return kafkaHandler(id, key, t, received)
+						}
+						kafka.ReadFromKafkaWithContext(ctx, name, offset, config.bootstrapServers, config.topic, group, config.from, rateLimitedHandler)
+					}
+				}(thread)
+			}
+		} else {
+			// Generate random messages for test purposes
+			Logger.Printf("Generating random messages")
+			go func() {
+				i := 0
+				var lastEmit time.Time
+				for keepRunning {
+					id := fmt.Sprintf("random_%d", i)
+					message := fmt.Sprintf("This is a random message %d", i)
+					kafkaHandler(id, nil, time.Now(), []byte(message))
+					i++
+					if config.eps > 0 {
+						now := time.Now()
+						if !lastEmit.IsZero() {
+							elapsed := now.Sub(lastEmit)
+							minInterval := time.Duration(float64(time.Second) / config.eps)
+							if elapsed < minInterval {
+								time.Sleep(minInterval - elapsed)
+							}
+						}
+						lastEmit = time.Now()
+					} else {
+						time.Sleep(1 * time.Second)
+					}
 				}
-			}(thread)
+			}()
 		}
 	}
 
@@ -796,14 +937,13 @@ func main() {
 		case <-hup:
 			Logger.Printf("SIGHUP received: reopening log file for logrotate...")
 			if config.logFileName != "" {
-				err := logfile.SetLogFile(config.logFileName, Logger)
+				err := Logger.SetLogFile(config.logFileName)
 				if err != nil {
-					Logger.Printf("Error reopening log file: %v", err)
+					Logger.Errorf("Error reopening log file: %v", err)
 				} else {
 					Logger.Printf("Log file reopened: %s", config.logFileName)
 				}
 			}
-			// Do NOT reload config or restart threads
 		}
 	}
 	if conn != nil {

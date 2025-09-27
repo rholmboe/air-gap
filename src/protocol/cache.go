@@ -2,7 +2,6 @@ package protocol
 
 import (
 	"errors"
-	"log"
 	"sync"
 	"time"
 )
@@ -54,7 +53,7 @@ func (m *MessageCache) RemoveEntry(id string) {
 func (m *MessageCache) AddEntryValue(id string, messageId uint16, maxMessageId uint16, payload []byte) {
 	entry, _ := m.GetEntry(id)
 	m.mu.Lock()
-	// log.Printf("%v Updating cache item: %v slot %d with value: %s", GetTimestamp(), id, messageId, payload)
+	Logger.Debugf("%v Updating cache item: %v slot %d with value: %s", GetTimestamp(), id, messageId, payload)
 	entry.val[messageId] = append([]byte(nil), payload...)
 	m.entries[id] = entry
 	m.mu.Unlock()
@@ -94,7 +93,7 @@ func (m *MessageCache) CleanList() {
 
 	for key, entry := range m.entries {
 		if entry.end.Before(time.Now()) {
-			log.Printf("%v Removing cache item: %v", GetTimestamp(), key)
+			Logger.Debugf("%v Removing cache item: %v", GetTimestamp(), key)
 			delete(m.entries, key)
 		}
 	}

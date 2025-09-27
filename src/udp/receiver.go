@@ -1,11 +1,14 @@
 package udp
 
 import (
-	"fmt"
 	"net"
 	"sync"
 	"time"
+
+	"sitia.nu/airgap/src/logging"
 )
+
+var Logger = logging.Logger
 
 // Start a UDP listener on the assigned port and address, stoppable via stopChan
 func ListenUDPWithStop(address string, port int, callback func(arg []byte), mtu uint16, stopChan <-chan struct{}) {
@@ -16,12 +19,12 @@ func ListenUDPWithStop(address string, port int, callback func(arg []byte), mtu 
 
 	conn, err := net.ListenUDP("udp", &addr)
 	if err != nil {
-		fmt.Println(err)
+		Logger.Errorf("Error starting UDP listener: %v", err)
 		return
 	}
 	defer conn.Close()
 
-	Logger.Printf("Listening on %s (stoppable)\n", addr.String())
+	Logger.Printf("Listening on %s", addr.String())
 
 	buf := make([]byte, mtu)
 	done := false
@@ -43,7 +46,7 @@ func ListenUDPWithStop(address string, port int, callback func(arg []byte), mtu 
 					done = true
 					continue
 				}
-				fmt.Println(err)
+				Logger.Errorf("Error reading from UDP connection: %v", err)
 				continue
 			}
 			// Copy the data before passing it to the callback
@@ -60,7 +63,7 @@ func handleConnection(conn *net.UDPConn, _ *net.UDPAddr, wg *sync.WaitGroup, cal
 	buf := make([]byte, mtu)
 	n, _, err := conn.ReadFromUDP(buf)
 	if err != nil {
-		fmt.Println(err)
+		Logger.Errorf("Error reading from UDP connection: %v", err)
 		return
 	}
 	callback(buf[:n])
@@ -75,7 +78,7 @@ func ListenUDP(address string, port int, callback func(arg []byte), mtu uint16) 
 
 	conn, err := net.ListenUDP("udp", &addr)
 	if err != nil {
-		fmt.Println(err)
+		Logger.Errorf("Error starting UDP listener: %v", err)
 		return
 	}
 	defer conn.Close()

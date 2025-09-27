@@ -1,5 +1,7 @@
+
 package nu.sitia.airgap.gapdetector;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import org.roaringbitmap.longlong.Roaring64NavigableMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -8,7 +10,100 @@ import java.util.*;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class GapDetector implements java.io.Serializable {
+
+    private static final Logger LOG = LoggerFactory.getLogger(GapDetector.class);
+    private static final long serialVersionUID = 3L;
+    /** Name of the upstream topic  */
+    @JsonProperty("topic")
+    private String topicName;
+
+    /** Track the highest offset ever received */
+    private long lastReceived = Long.MIN_VALUE;
+    /** Track the lowest offset ever received */
+    private long minReceived = Long.MAX_VALUE;
+
+    private long windowSize; // max offsets per window
+    private int maxWindows;  // max number of windows to keep
+    private LinkedList<Window> windows = new LinkedList<>();
+
+
+
+
+    // Getters and setters for serialization/deserialization and external access
+    public String getTopicName() {
+        return topicName;
+    }
+
+    public void setTopicName(String topicName) {
+        this.topicName = topicName;
+    }
+
+    public long getWindowSize() {
+        return windowSize;
+    }
+
+    public void setWindowSize(long windowSize) {
+        this.windowSize = windowSize;
+    }
+
+    public int getMaxWindows() {
+        return maxWindows;
+    }
+
+    public void setMaxWindows(int maxWindows) {
+        this.maxWindows = maxWindows;
+    }
+
+    public void setLastReceived(long lastReceived) {
+        this.lastReceived = lastReceived;
+    }
+
+    public void setMinReceived(long minReceived) {
+        this.minReceived = minReceived;
+    }
+
+    public long getLastReceived() {
+        return lastReceived;
+    }
+    
+    public long getMinReceived() {
+        return minReceived;
+    }
+
+    public LinkedList<Window> getWindowsList() {
+        return windows;
+    }
+
+    public void setWindows(LinkedList<Window> windows) {
+        this.windows = windows;
+    }
+
+    // No-arg constructor for Jackson
+    public GapDetector() {
+        this.topicName = "";
+        this.windowSize = 10;
+        this.maxWindows = 1;
+        this.lastReceived = Long.MIN_VALUE;
+        this.minReceived = Long.MAX_VALUE;
+        this.windows = new LinkedList<>();
+    }
+
+    public GapDetector(String topicName, long windowSize, int maxWindows) {
+        this.topicName = topicName;
+        this.windowSize = windowSize;
+        this.maxWindows = maxWindows;
+    }
+
+    public List<Window> getWindows() {
+        return windows;
+    }
+
     /**
      * Estimate the memory usage (in bytes) for all loaded windows.
      * This is a rough estimate: each window has a small overhead, and each offset in the bitmap costs memory.
@@ -24,52 +119,51 @@ public class GapDetector implements java.io.Serializable {
         }
         return total;
     }
-    private static final Logger LOG = LoggerFactory.getLogger(GapDetector.class);
-    private static final long serialVersionUID = 1L;
 
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
         GapDetector that = (GapDetector) o;
-        return windowSize == that.windowSize &&
-                maxWindows == that.maxWindows; //&&
-                //Objects.equals(windows, that.windows);
+        return that.asJson().equals(this.asJson());
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(windowSize, maxWindows, windows);
+        return Objects.hash(this.asJson());
     }
 
-    /** Track the highest offset ever received */
-    private long lastReceived = Long.MIN_VALUE;
-    /** Track the lowest offset ever received */
-    private long minReceived = Long.MAX_VALUE;
-
-    private final long windowSize; // max offsets per window
-    private int maxWindows;  // max number of windows to keep
-    private final LinkedList<Window> windows = new LinkedList<>();
-
-    public GapDetector(long windowSize, int maxWindows) {
-        this.windowSize = windowSize;
-        this.maxWindows = maxWindows;
+    public String asJson() {
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            return mapper.writeValueAsString(this);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to serialize GapDetector to JSON", e);
+        }
     }
 
-    public long getLastReceived() {
-        return lastReceived;
-    }
-
-    public long getMinReceived() {
-        return minReceived;
+    public void fromJson(String json) {
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            GapDetector other = mapper.readValue(json, GapDetector.class);
+            // Copy all fields from 'other' to 'this'
+            this.topicName = other.topicName;
+            this.windowSize = other.windowSize;
+            this.maxWindows = other.maxWindows;
+            this.lastReceived = other.lastReceived;
+            this.minReceived = other.minReceived;
+            this.windows = other.windows;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to parse GapDetector JSON", e);
+        }
     }
 
     // Expose a public view for purged windows
     public interface WindowView {
-        long getMinOffset();
-        long getMaxOffset();
-        long getCreatedAt();
-        List<Gap> findGaps();
+    long getMinOffset();
+    long getMaxOffset();
+    long getCreatedAt();
+    List<List<Long>> findGaps();
     }
 
     /**
@@ -100,7 +194,7 @@ public class GapDetector implements java.io.Serializable {
                         public long getMinOffset() { return old.minOffset; }
                         public long getMaxOffset() { return old.maxOffset; }
                         public long getCreatedAt() { return old.createdAt; }
-                        public List<Gap> findGaps() { return old.findGapsFiltered(minReceived); }
+                        public List<List<Long>> findGaps() { return old.findGapsFiltered(minReceived); }
                     });
                 }
             }
@@ -138,30 +232,30 @@ public class GapDetector implements java.io.Serializable {
         return null;
     }
 
-    /** Emit all gaps in windows that were created before a given timestamp */
-    public List<Gap> emitGapsBefore(long timestamp) {
-        List<Gap> gaps = new ArrayList<>();
+    /**
+     * Extract all missing offsets from windows, filtering out gaps below minReceived, in compact format.
+     * @return List<List<Long>> compact gap format
+     */
+    public List<List<Long>> getAllCompactGaps() {
+        List<List<Long>> compactGaps = new ArrayList<>();
         for (Window w : windows) {
-            if (w.createdAt < timestamp) {
-                gaps.addAll(w.findGapsFiltered(minReceived));
-            }
+            compactGaps.addAll(w.findGapsFiltered(minReceived));
         }
-        return gaps;
+        return compactGaps;
     }
 
-    /** Extract all missing offsets from windows, filtering out gaps below minReceived. */
-    public List<Gap> getAllGaps() {
-        List<Gap> gaps = new ArrayList<>();
-        for (Window w : windows) {
-            for (Gap g : w.findGapsFiltered(minReceived)) {
-                if (lastReceived >= g.getFrom()) {
-                    gaps.add(g);
-                }
+    public long getMissingCounts() {
+        long missingCount = 0;
+        for (List<Long> gap : getAllCompactGaps()) {
+            if (gap.size() == 1) {
+                missingCount += 1;
+            } else if (gap.size() == 2) {
+                missingCount += gap.get(1) - gap.get(0) + 1;
             }
         }
-        return gaps;
+        return missingCount;
     }
-
+                        
     public void purge() {
         windows.clear();
         minReceived = Long.MAX_VALUE;
@@ -173,7 +267,15 @@ public class GapDetector implements java.io.Serializable {
     }
 
     /** Represents a single window */
-    private static class Window implements java.io.Serializable {
+    public static class Window implements java.io.Serializable {
+    // Track sticky empty emission state (not serialized)
+    public transient boolean[] lastEmittedNonEmpty = null;
+        // No-arg constructor for Jackson
+        public Window() {
+            this.minOffset = 0L;
+            this.maxOffset = 0L;
+            this.createdAt = System.currentTimeMillis();
+        }
         final long minOffset;
         final long maxOffset;
         final long createdAt;
@@ -183,6 +285,14 @@ public class GapDetector implements java.io.Serializable {
             this.minOffset = minOffset;
             this.maxOffset = maxOffset;
             this.createdAt = System.currentTimeMillis();
+        }
+
+        public long getMinOffset() {
+            return minOffset;
+        }
+        
+        public long getMaxOffset() {
+            return maxOffset;
         }
 
         boolean contains(long number) {
@@ -196,15 +306,21 @@ public class GapDetector implements java.io.Serializable {
         /**
          * Find gaps, but only return those where gap.from >= minAllowed.
          */
-        List<Gap> findGapsFiltered(long minAllowed) {
-            List<Gap> gaps = new ArrayList<>();
+        /**
+         * Find gaps, but only return those where gap.from >= minAllowed, in compact format.
+         * The last gap (tail gap to maxOffset) is excluded.
+         * Returns: List<List<Long>>: [from] for single, [from, to] for range.
+         */
+        public List<List<Long>> findGapsFiltered(long minAllowed) {
+            List<List<Long>> compactGaps = new ArrayList<>();
 
-            long lastChecked = 0;
             long windowLength = maxOffset - minOffset + 1;
-
-            // Iterate over present runs and derive gaps
             org.roaringbitmap.longlong.LongIterator it = received.getLongIterator();
             long prev = -1;
+            long lastChecked = 0;
+
+            // Collect all gaps as Gap objects for easier tail exclusion
+            List<Gap> allGaps = new ArrayList<>();
 
             while (it.hasNext()) {
                 long val = it.next();
@@ -213,45 +329,41 @@ public class GapDetector implements java.io.Serializable {
                     long gapFrom = minOffset;
                     long gapTo = minOffset + val - 1;
                     if (gapFrom >= minAllowed) {
-                        gaps.add(new Gap(gapFrom, gapTo));
+                        allGaps.add(new Gap(gapFrom, gapTo));
                     } else if (gapTo >= minAllowed) {
-                        gaps.add(new Gap(minAllowed, gapTo));
+                        allGaps.add(new Gap(minAllowed, gapTo));
                     }
                 } else if (prev != -1 && val > prev + 1) {
                     // Gap between prev and val
                     long gapFrom = minOffset + prev + 1;
                     long gapTo = minOffset + val - 1;
                     if (gapFrom >= minAllowed) {
-                        gaps.add(new Gap(gapFrom, gapTo));
+                        allGaps.add(new Gap(gapFrom, gapTo));
                     } else if (gapTo >= minAllowed) {
-                        gaps.add(new Gap(minAllowed, gapTo));
+                        allGaps.add(new Gap(minAllowed, gapTo));
                     }
                 }
                 prev = val;
                 lastChecked = val;
             }
 
-            // Tail gap if not filled up to the maxOffset
-            if (prev != -1 && lastChecked < windowLength - 1) {
-                long gapFrom = minOffset + lastChecked + 1;
-                long gapTo = maxOffset;
-                if (gapFrom >= minAllowed) {
-                    gaps.add(new Gap(gapFrom, gapTo));
-                } else if (gapTo >= minAllowed) {
-                    gaps.add(new Gap(minAllowed, gapTo));
+            // Only exclude the true tail gap (from last received + 1 to maxOffset)
+            int n = allGaps.size();
+            for (int i = 0; i < n; i++) {
+                Gap g = allGaps.get(i);
+                // Exclude only if this is the last gap and it is a true tail gap
+                boolean isLast = (i == n - 1);
+                boolean isTailGap = isLast && (g.getTo() == maxOffset) && (g.getFrom() == (prev == -1 ? minOffset : minOffset + prev + 1));
+                if (isTailGap) {
+                    continue;
                 }
-            } else if (prev == -1) {
-                // Special case: window is completely empty
-                long gapFrom = minOffset;
-                long gapTo = maxOffset;
-                if (gapFrom >= minAllowed) {
-                    gaps.add(new Gap(gapFrom, gapTo));
-                } else if (gapTo >= minAllowed) {
-                    gaps.add(new Gap(minAllowed, gapTo));
+                if (g.getFrom() == g.getTo()) {
+                    compactGaps.add(java.util.Collections.singletonList(g.getFrom()));
+                } else {
+                    compactGaps.add(java.util.Arrays.asList(g.getFrom(), g.getTo()));
                 }
             }
-
-            return gaps;
+            return compactGaps;
         }
 
         boolean isFull() {
@@ -271,6 +383,7 @@ public class GapDetector implements java.io.Serializable {
             ))
             .collect(Collectors.toList());
     }
+
 
 
 }

@@ -1,26 +1,17 @@
 package gap_util
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
-	"sitia.nu/airgap/src/timestamp_util"
+	"sitia.nu/airgap/src/logging"
 )
 
 var timeStamp time.Time
-var verbose = true
 var reportEventsAsMissingAfterMs = 30000
-var Logger = log.New(os.Stdout, "", log.LstdFlags)
-
-func SetLogger(newLogger *log.Logger) {
-	Logger = newLogger
-}
+var Logger = logging.Logger
 
 type Gap struct {
 	From      int64     // row number in a partition
@@ -67,31 +58,22 @@ func GetAllGaps(key string) Gaps {
 // Update the gaps to reflect the newly received number
 // Return true iff the message has already been received (duplicate)
 func CheckNextNumber(key string, number int64) bool {
-	var verbose = false // override verbose. Set to false in production
 	var returnValue bool = false
-	if verbose {
-		Logger.Printf("checkNextNumber %s %d", key, number)
-	}
+	Logger.Debugf("checkNextNumber %s %d", key, number)
 	currentGaps, ok := allGaps[key]
 	if ok == false {
-		if verbose {
-			Logger.Printf("Adding new currentGaps with key %s", key)
-		}
+		Logger.Debugf("Adding new currentGaps with key %s", key)
 		// not found, initialize a new Gaps struct
 		currentGaps = Gaps{
 			ExpectedNumber: 0,
 			Gaps:           []Gap{},
 		}
 	} else {
-		if verbose {
-			Logger.Printf("Using stored currentGaps with expectedNumber: %d", currentGaps.ExpectedNumber)
-		}
+		Logger.Debugf("Using stored currentGaps with expectedNumber: %d", currentGaps.ExpectedNumber)
 	}
 	// Check if the currentGaps->number is the next expected
 	if currentGaps.ExpectedNumber == number {
-		if verbose {
-			Logger.Printf("received number %d was the expected", number)
-		}
+		Logger.Debugf("received number %d was the expected", number)
 		// Yes, update the struct so we expect the next number
 		currentGaps.ExpectedNumber++
 	} else if number > currentGaps.ExpectedNumber {
@@ -101,9 +83,7 @@ func CheckNextNumber(key string, number int64) bool {
 			To:        (number - 1),
 			Timestamp: time.Now(),
 		}
-		if verbose {
-			Logger.Printf("Gap detected. Adding from %d to %d", gap.From, gap.To)
-		}
+		Logger.Debugf("Gap detected. Adding from %d to %d", gap.From, gap.To)
 		mu.Lock()
 		currentGaps.Gaps = append(currentGaps.Gaps, gap)
 		currentGaps.ExpectedNumber = number + 1
@@ -117,9 +97,7 @@ func CheckNextNumber(key string, number int64) bool {
 			gap := currentGaps.Gaps[gapNumber]
 			// There is a gap for this number
 			if number == gap.From && number == gap.To {
-				if verbose {
-					Logger.Printf("Number is this gap, remove gap")
-				}
+				Logger.Debugf("Number is this gap, remove gap")
 				// Gap was missing just this number
 				// remove the gap
 				mu.Lock()
@@ -127,18 +105,14 @@ func CheckNextNumber(key string, number int64) bool {
 				mu.Unlock()
 			} else if number == gap.From && number != gap.To {
 				// just remove the from. There are other missing numbers too
-				if verbose {
-					Logger.Printf("Number is the start of this gap, adding from")
-				}
+				Logger.Debugf("Number is the start of this gap, adding from")
 				gap.From += 1
 				mu.Lock()
 				currentGaps.Gaps[gapNumber] = gap
 				mu.Unlock()
 			} else if number != gap.From && number == gap.To {
 				// missing just the last one
-				if verbose {
-					Logger.Printf("Number is the end of this gap, subtracting to")
-				}
+				Logger.Debugf("Number is the end of this gap, subtracting to")
 				gap.To -= 1
 				mu.Lock()
 				currentGaps.Gaps[gapNumber] = gap
@@ -146,9 +120,7 @@ func CheckNextNumber(key string, number int64) bool {
 			} else {
 				// The gap is more than 2 long and the received item is in the middle of the gap
 				// Split the gap into two gaps with from .. number-1, number+1 .. to
-				if verbose {
-					Logger.Printf("Creating new gap")
-				}
+				Logger.Debugf("Creating new gap")
 				newGap := Gap{
 					From:      number + 1,
 					To:        gap.To,
@@ -212,46 +184,4 @@ func getGapForNumber(gaps []Gap, number int64) (int, error) {
 		}
 	}
 	return -1, errors.New("Not found")
-}
-
-func Save(fileName string, configFileName string) error {
-	bytes, err := json.Marshal(allGaps)
-	if err != nil {
-		return err
-	}
-	f, error := os.Create(fileName)
-	if error != nil {
-		return error
-	}
-	defer f.Close()
-	f.Write(bytes)
-
-	// Update the timestamp in the config
-	ts := timeStamp.Format("2006-01-02T15:04:05Z07:00")
-	return timestamp_util.SaveTimestampInConfig(configFileName, ts)
-}
-
-func Load(fileName string) error {
-	ex, err := os.Executable()
-	if err != nil {
-		Logger.Fatal(err)
-	}
-	path := filepath.Dir(ex)
-	Logger.Printf("gap_detector starting in directory: %s", path)
-	Logger.Printf("Trying to load gap file: %s", fileName)
-	_, err = os.Stat(fileName)
-	if errors.Is(err, os.ErrNotExist) {
-		// File doesn't exist (new installation)
-		Logger.Printf("WARNING: No Gap file found at: %s %s", fileName, err)
-		return nil
-	}
-	content, error := os.ReadFile(fileName)
-	if error != nil {
-		return error
-	}
-	err = json.Unmarshal(content, &allGaps)
-	if err != nil {
-		return error
-	}
-	return nil
 }

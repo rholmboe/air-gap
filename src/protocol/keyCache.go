@@ -2,7 +2,6 @@ package protocol
 
 import (
 	"errors"
-	"log"
 	"sync"
 	"time"
 )
@@ -10,16 +9,16 @@ import (
 // Time each cache entry should live
 // Also, how often the background thread
 // removing old entries should run
-const keyTTL = 7200 * time.Second 
+const keyTTL = 7200 * time.Second
 
 type KeyCacheEntry struct {
 	end time.Time
-	len	uint16
+	len uint16
 	val []byte
 }
 
 type KeyCache struct {
-	mu	    sync.RWMutex
+	mu      sync.RWMutex
 	entries map[string]KeyCacheEntry
 }
 
@@ -33,7 +32,7 @@ func (m *KeyCache) GetKey(id string) (KeyCacheEntry, error) {
 	return *createKeyCacheEntry(), errors.New("No such key")
 }
 
-func (m *KeyCache) AddKey(id string, payload [] byte) {
+func (m *KeyCache) AddKey(id string, payload []byte) {
 	entry := createKeyCacheEntry()
 	entry.len = uint16(len(payload))
 	entry.val = payload
@@ -47,7 +46,6 @@ func (m *MessageCache) RemoveKey(id string) {
 	delete(m.entries, id)
 	m.mu.Unlock()
 }
-
 
 func createKeyCacheEntry() *KeyCacheEntry {
 	return &KeyCacheEntry{
@@ -68,12 +66,12 @@ func CreateKeyCache() *KeyCache {
 }
 
 func (m *KeyCache) StartCleaning() {
-    ticker := time.NewTicker(TTL)
-    go func() {
-        for range ticker.C {
-            m.CleanList()
-        }
-    }()
+	ticker := time.NewTicker(TTL)
+	go func() {
+		for range ticker.C {
+			m.CleanList()
+		}
+	}()
 }
 
 // Remove old entries. Should be run every 30 second or so
@@ -83,7 +81,7 @@ func (m *KeyCache) CleanList() {
 
 	for key, entry := range m.entries {
 		if entry.end.Before(time.Now()) {
-			log.Printf("%v Removing cache item: %v", GetTimestamp(), key)
+			Logger.Debugf("%v Removing cache item: %v", GetTimestamp(), key)
 			delete(m.entries, key)
 		}
 	}
