@@ -37,7 +37,7 @@ func TestSendKafkaMessageEncrypted(t *testing.T) {
 		},
 		{
 			name:     "Test 2",
-			mtu:      25,
+			mtu:      50,
 			id:       "testID",
 			message:  "This is a longer test message that should be split into multiple parts. abcdefghijklmnopqrstuvwxyzåäö",
 			expected: 33,
@@ -57,8 +57,8 @@ func TestSendKafkaMessageEncrypted(t *testing.T) {
 			}
 			actual := protocol.FormatMessage(protocol.TYPE_MESSAGE, tt.id, ciphertext, uint16(tt.mtu))
 			for _, str := range actual {
-				_, _, encrypted, ok := protocol.ParseMessage(str, cache) // Pass the dereferenced value of cache
-				if ok != nil {
+				ptype, _, encrypted, _ := protocol.ParseMessage(str, cache) // Pass the dereferenced value of cache
+				if ptype == protocol.TYPE_MULTIPART {
 					// Message is incomplete or part of a larger message, skip
 					return
 				}
@@ -66,7 +66,7 @@ func TestSendKafkaMessageEncrypted(t *testing.T) {
 				decrypted, _ := protocol.Decrypt(encrypted, key)
 				fmt.Println("Received: " + string(decrypted))
 				// check the result
-				if !reflect.DeepEqual(decrypted, tt.message) {
+				if !reflect.DeepEqual(string(decrypted), tt.message) {
 					t.Errorf("FormatMessage(%d, %s, %s) = %v; expected %v", tt.mtu, tt.id, tt.message, actual, tt.expected)
 				}
 			}

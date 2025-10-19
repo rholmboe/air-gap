@@ -50,18 +50,38 @@ The deduplicator already exposes JMX methods to JConsole for monitoring (you can
          attributes:
            - attr: HeapMemoryUsage
              field: memory.heap_usage
-      - mbean: 'nu.sitia.airgap:type=GapDetectors'
-         attributes:
-         - attr: 0_gaps
-            field: partition_0_gaps
-         - attr: 1_gaps
-            field: partition_1_gaps
-      - mbean: 'nu.sitia.airgap:type=Props'
-         attributes:
-         - attr: WINDOW_SIZE
-            field: window_size
-         - attr: MAX_WINDOWS
-            field: max_windows             
+    - mbean: 'nu.sitia.airgap:partition=3,type=GapDetectors'
+      attributes:
+      - attr: topicname_3_gaps
+        field: partition_3_gaps
+      - attr: topicname_3_nrWindows
+        field: partition_3_nrWindows
+      - attr: topicname_3_nrMissing
+        field: partition_3_nrMissing
+      - attr: topicname_3_mem
+        field: partition_3_mem
+    - mbean: 'nu.sitia.airgap:partition=1,type=GapDetectors'
+      attributes:
+      - attr: topicname_1_gaps
+        field: partition_1_gaps
+      - attr: topicname_1_nrWindows
+        field: partition_1_nrWindows
+      - attr: topicname_1_nrMissing
+        field: partition_1_nrMissing
+      - attr: topicname_1_mem
+        field: partition_1_mem
+    - mbean: 'nu.sitia.airgap:type=Props'
+      attributes:
+      - attr: WINDOW_SIZE
+        field: window_size
+      - attr: MAX_WINDOWS
+        field: max_windows
+      - attr: GAP_EMIT_INTERVAL_SEC
+        field: gap_emit_interval_sec
+      - attr: RAW_TOPICS
+        field: raw_topics
+      - attr: assignedRawPartitions
+        field: assigned_raw_partitions
    ```
 
 If one common .service-file is used to start several instances of dedup with differnt .env files, make the following changes:
@@ -95,27 +115,20 @@ sudo systemctl enable --now metricbeat
 
 ### Using JMX Methods from JmxSupport.java in PartitionDedupApp
 
-The PartitionDedupApp exposes rich runtime information and operations via JMX, thanks to the `JmxSupport` class. You can access these via JConsole, Jolokia, or any JMX client.
-
+The PartitionDedupApp exposes runtime information and operations via JMX, accessible through JConsole, Jolokia, or any JMX client.
 
 #### What is Exposed?
 - **GapDetectors MBean** (per partition):
   - Each partition is registered as its own MBean:
-    - `nu.sitia.airgap:type=GapDetectors,partition=0`
-    - `nu.sitia.airgap:type=GapDetectors,partition=1`
+    - `nu.sitia.airgap:partition=3,type=GapDetectors`
+    - `nu.sitia.airgap:partition=1,type=GapDetectors`
     - ...etc.
   - For each partition MBean, exposes:
-    - `<topic>_<partition>`: Info about the GapDetector for that partition (window stats, offsets, etc.)
-    - `<topic>_<partition>_gaps`: Current gaps for that partition
-    - `<topic>_<partition>_mem`: Estimated memory usage for that partition
-    - `<topic>_<partition>_nrMissing`: Number of missing offsets for that partition
-    - `<topic>_<partition>_nrWindows`: Number of windows for that partition
-    - Operations: `getAllGaps_<topic>_<partition>()` and `purge_<topic>_<partition>()` to fetch or purge gaps for a specific partition
-- **Aggregate GapDetectors MBean** (optional):
-  - `nu.sitia.airgap:type=GapDetectors,partition=-1` provides aggregate stats across all partitions (if enabled in your code).
+    - `topicname_3_gaps`, `topicname_3_nrWindows`, `topicname_3_nrMissing`, `topicname_3_mem`, etc. (for partition 3)
+    - `topicname_1_gaps`, `topicname_1_nrWindows`, `topicname_1_nrMissing`, `topicname_1_mem`, etc. (for partition 1)
+    - Operations: `getAllGaps_topicname_3`, `purge_topicname_3`, `getAllGaps_topicname_1`, `purge_topicname_1`, etc.
 - **Props MBean** (`nu.sitia.airgap:type=Props`):
-  - All Kafka Streams properties
-  - Topics, assigned partitions, window size, max windows, and other runtime config
+  - Kafka Streams properties, runtime config, assigned partitions, topics, window size, etc.
 
 #### How to Use
 - **With JConsole:**
@@ -123,26 +136,21 @@ The PartitionDedupApp exposes rich runtime information and operations via JMX, t
   2. Open JConsole and connect to the running JVM.
   3. Browse to `nu.sitia.airgap -> GapDetectors` or `Props` to view attributes and invoke operations.
 - **With Jolokia (for Metricbeat):**
-  - The Jolokia agent exposes these MBeans over HTTP. Metricbeat can be configured to scrape specific attributes or call operations.
-
-  - Example: To fetch all gaps for partition 0, configure Metricbeat's `jolokia.yml` to query the `getAllGaps_transfer_0` operation on the `nu.sitia.airgap:type=GapDetectors,partition=0` MBean.
+  - Jolokia exposes these MBeans over HTTP. Metricbeat can be configured to scrape specific attributes or call operations.
 
 #### Example Jolokia Query (HTTP API)
-To call an operation (e.g., get all gaps for partition 0):
+To call an operation (e.g., get all gaps for partition 3):
 ```sh
 curl -X POST http://localhost:8778/jolokia/ \
   -H 'Content-Type: application/json' \
-  -d '{"type":"exec","mbean":"nu.sitia.airgap:type=GapDetectors,partition=0","operation":"getAllGaps_transfer_0"}'
+  -d '{"type":"exec","mbean":"nu.sitia.airgap:partition=3,type=GapDetectors","operation":"getAllGaps_topicname_3"}'
 ```
-To read an attribute (some examples):
+To read an attribute (examples):
 ```sh
-curl http://127.0.0.1:8778/jolokia/read/java.lang:type=Memory
+curl http://localhost:8778/jolokia/read/nu.sitia.airgap:partition=3,type=GapDetectors/topicname_3_gaps
+curl http://localhost:8778/jolokia/read/nu.sitia.airgap:partition=1,type=GapDetectors/topicname_1_gaps
+curl http://localhost:8778/jolokia/read/nu.sitia.airgap:type=Props/WINDOW_SIZE
 curl http://localhost:8778/jolokia/list/nu.sitia.airgap
-curl http://localhost:8778/jolokia/read/nu.sitia.airgap:type=GapDetectors,partition=0/transfer_0
-curl http://localhost:8778/jolokia/read/nu.sitia.airgap:type=GapDetectors,partition=0/transfer_0_mem
-curl http://localhost:8778/jolokia/read/nu.sitia.airgap:type=GapDetectors,partition=0/transfer_0_gaps
-curl http://localhost:8778/jolokia/read/nu.sitia.airgap:type=GapDetectors,partition=0/transfer_0_nrMissing
-curl http://localhost:8778/jolokia/read/nu.sitia.airgap:type=Props
 ```
 
 #### Example Metricbeat Mapping
@@ -153,23 +161,41 @@ Add to your `jolokia.yml`:
   hosts: ["http://localhost:8778/jolokia"]
   namespace: "airgap"
   jmx.mappings:
-    - mbean: 'nu.sitia.airgap:type=GapDetectors,partition=0'
+    - mbean: 'nu.sitia.airgap:partition=3,type=GapDetectors'
       attributes:
-        - attr: transfer_0_gaps
-          field: partition_0_gaps
-    - mbean: 'nu.sitia.airgap:type=GapDetectors,partition=1'
+        - attr: topicname_3_gaps
+          field: partition_3_gaps
+        - attr: topicname_3_nrWindows
+          field: partition_3_nrWindows
+        - attr: topicname_3_nrMissing
+          field: partition_3_nrMissing
+        - attr: topicname_3_mem
+          field: partition_3_mem
+    - mbean: 'nu.sitia.airgap:partition=1,type=GapDetectors'
       attributes:
-        - attr: transfer_1_gaps
+        - attr: topicname_1_gaps
           field: partition_1_gaps
+        - attr: topicname_1_nrWindows
+          field: partition_1_nrWindows
+        - attr: topicname_1_nrMissing
+          field: partition_1_nrMissing
+        - attr: topicname_1_mem
+          field: partition_1_mem
     - mbean: 'nu.sitia.airgap:type=Props'
       attributes:
         - attr: WINDOW_SIZE
           field: window_size
         - attr: MAX_WINDOWS
           field: max_windows
+        - attr: GAP_EMIT_INTERVAL_SEC
+          field: gap_emit_interval_sec
+        - attr: RAW_TOPICS
+          field: raw_topics
+        - attr: assignedRawPartitions
+          field: assigned_raw_partitions
 ```
 
-**Tip:** You can use JConsole or Jolokia to purge gaps or inspect all runtime config and state, per partition, without restarting the app.
+**Tip:** Use the Jolokia `/list` endpoint to discover available attributes and operations for your running instance. Only partitions/topics assigned to the current deduplicator instance will appear. If you get “attribute not found” errors, check the exact attribute/operation name and partition assignment in the list output.
 
 ---
 

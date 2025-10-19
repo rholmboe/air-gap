@@ -8,7 +8,6 @@ import (
 )
 
 type MessageCacheEntry struct {
-	end       time.Time
 	key       string
 	val       []byte
 	topic     string
@@ -16,114 +15,126 @@ type MessageCacheEntry struct {
 }
 
 type MessageCache struct {
-	mu sync.RWMutex
-	// key is the id of the message
+	mu      sync.RWMutex
 	entries []MessageCacheEntry
 }
 
-// Time to live for items in the message cache
-const TTL = 30000
-
 var (
-	cache = MessageCache{
-		entries: make([]MessageCacheEntry, 0),
-	}
-	producer sarama.AsyncProducer
-	doneChan chan struct{}
-	wg       sync.WaitGroup
+	cache     = MessageCache{entries: make([]MessageCacheEntry, 0)}
+	producer  sarama.AsyncProducer
+	doneChan  chan struct{}
+	wg        sync.WaitGroup
+	batchSize int
 )
 
-func SetProducer(p sarama.AsyncProducer) {
-	// Stop background thread before replacing producer
+func SetProducer(p sarama.AsyncProducer, cfgBatchSize int) {
 	StopBackgroundThread()
 	producer = p
-	// Clear cache before starting new thread
+	batchSize = cfgBatchSize
+
 	cache.mu.Lock()
 	cache.entries = nil
 	cache.mu.Unlock()
+	StartBackgroundThread()
 }
 
 func StartBackgroundThread() {
 	if producer == nil || doneChan != nil {
 		return
 	}
+
 	ticker := time.NewTicker(10 * time.Millisecond)
 	doneChan = make(chan struct{})
 	wg.Add(1)
+
 	go func() {
 		defer wg.Done()
 		for {
 			select {
 			case <-ticker.C:
-				length := len(cache.entries)
-				for i := 0; i < len(cache.entries); i++ {
-					entry := cache.entries[i]
-					DoWriteToKafka(entry.key, entry.topic, entry.partition, entry.val)
-				}
-				cache.mu.Lock()
-				cache.entries = cache.entries[length:]
-				cache.mu.Unlock()
+				sendBatch()
 			case <-doneChan:
 				ticker.Stop()
+				sendBatch()
 				return
 			}
 		}
 	}()
 }
 
-// Stop the Kafka background thread safely
 func StopBackgroundThread() {
 	if doneChan != nil {
 		close(doneChan)
 		wg.Wait()
 		doneChan = nil
-		// Clear cache to avoid sending old messages after restart
 		cache.mu.Lock()
 		cache.entries = nil
 		cache.mu.Unlock()
 	}
 }
 
-// WriteToKafka stores a message in the cache with a specified key and topic.
-// The message is stored with a TTL (Time To Live), after which it will be removed from the cache. (not yet implemented)
-// The function locks the cache while adding the entry to prevent race conditions.
-//
-// Parameters:
-// messageKey: A unique identifier for the message. This key is used to retrieve the message from the cache.
-// topics: The Kafka topic where the message will be published.
-// message: The message to be published to the Kafka topic.
-func WriteToKafka(messageKey string, topics string, partition int32, message []byte) {
+func WriteToKafka(key, topic string, partition int32, val []byte) {
 	cache.mu.Lock()
+	copyVal := make([]byte, len(val))
+	copy(copyVal, val)
 	cache.entries = append(cache.entries, MessageCacheEntry{
-		end:       time.Now().Add(time.Millisecond + TTL),
-		key:       messageKey,
-		val:       message,
-		topic:     topics,
+		key:       key,
+		val:       copyVal,
+		topic:     topic,
 		partition: partition,
 	})
 	cache.mu.Unlock()
 }
 
-// Background thread that sends messages to Kafka.
-func DoWriteToKafka(messageKey string, topics string, partition int32, message []byte) {
-	defer func() {
-		if r := recover(); r != nil {
-			Logger.Printf("Recovered from panic in DoWriteToKafka: %v", r)
-		}
-	}()
-	if producer == nil {
+func sendBatch() {
+	cache.mu.Lock()
+	n := len(cache.entries)
+	if n == 0 {
+		cache.mu.Unlock()
 		return
 	}
-	msg := &sarama.ProducerMessage{
-		Topic:     topics,
-		Key:       sarama.StringEncoder(messageKey),
-		Value:     sarama.StringEncoder(message),
-		Partition: partition,
-	}
-	Logger.Debugf("Sending message with key %s to Kafka topic %s partition %d\n", messageKey, topics, partition)
 
-	if msg.Partition != partition {
-		Logger.Warnf("Partition mismatch before send! msg.Partition=%d, requested=%d", msg.Partition, partition)
+	var toSend []MessageCacheEntry
+	if n <= batchSize {
+		toSend = cache.entries
+		cache.entries = nil
+	} else {
+		toSend = cache.entries[:batchSize]
+		cache.entries = cache.entries[batchSize:]
 	}
-	producer.Input() <- msg
+	cache.mu.Unlock()
+
+	for _, m := range toSend {
+		if producer != nil {
+			msgCopy := make([]byte, len(m.val))
+			copy(msgCopy, m.val)
+			msg := &sarama.ProducerMessage{
+				Topic:     m.topic,
+				Key:       sarama.StringEncoder(m.key),
+				Value:     sarama.ByteEncoder(msgCopy),
+				Partition: m.partition,
+			}
+			producer.Input() <- msg
+		}
+	}
+}
+
+func FlushCache() {
+	for {
+		cache.mu.RLock()
+		n := len(cache.entries)
+		cache.mu.RUnlock()
+		if n == 0 {
+			break
+		}
+		sendBatch()
+		time.Sleep(1 * time.Millisecond)
+	}
+}
+
+func CloseProducer() {
+	if producer != nil {
+		producer.Close()
+		producer = nil
+	}
 }

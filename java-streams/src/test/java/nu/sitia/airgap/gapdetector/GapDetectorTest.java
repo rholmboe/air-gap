@@ -9,8 +9,10 @@ public class GapDetectorTest {
     public void testNoGapsWhenSequential() {
         GapDetector gd = new GapDetector("test", 10, 2);
         for (long i = 0; i < 10; i++) {
-            boolean dup = gd.check(i, null);
-            assertFalse(dup, "Should not be duplicate for new offset " + i);
+            int dup = gd.check(i, null);
+            //  1 if this number was already received, 0 if it’s newly received and -1 if it fills a gap.
+            //  If the number is less than the lowest known offset, it is considered unseen and -2 is returned.
+            assertEquals(dup,0, "Should not be duplicate for new offset " + i);
         }
         assertTrue(gd.getAllCompactGaps().isEmpty(), "No gaps expected for sequential input");
     }
@@ -51,8 +53,10 @@ public class GapDetectorTest {
     @Test
     public void testDuplicateDetection() {
         GapDetector gd = new GapDetector("test", 10, 2);
-        assertFalse(gd.check(0, null));
-        assertTrue(gd.check(0, null), "Second check for same offset should be duplicate");
+        //  1 if this number was already received, 0 if it’s newly received and -1 if it fills a gap.
+        //  If the number is less than the lowest known offset, it is considered unseen and -2 is returned.
+        assertEquals(gd.check(0, null), 0);
+        assertEquals(gd.check(0, null), 1, "Second check for same offset should be duplicate");
     }
 
     @Test

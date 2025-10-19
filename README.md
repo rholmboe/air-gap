@@ -19,11 +19,11 @@ This will build the upstream and downstream binaries as well as the Kafka Stream
 	- Edit `config/upstream.properties` and `config/downstream.properties` as needed (set `targetIP` to your local IP).
 	- In one terminal:
 	  ```bash
-	  go run src/downstream/downstream.go config/downstream.properties
+	  go run src/cmd/downstream/main.go config/downstream.properties
 	  ```
 	- In another terminal:
 	  ```bash
-	  go run src/upstream/upstream.go config/upstream.properties
+	  go run src/cmd/upstream/main.go config/upstream.properties
 	  ```
 	- You should see messages received in the first terminal.
 
@@ -50,7 +50,7 @@ N.B., neither the configuration files nor the key files are not shown in the abo
 
 upstream reads from a Kafka topic specified in the upstream configuration file. It then enrypts the data and sends it over the UDP connection, that might include a hardware diode. Packets that are more than MTU in size (with header) will get fragmented and sent as several UDP packets. Downstream listens to UDP packets, performs defragmentation and decryption of the content and writes to a Kafka instance and topic specified in the downstream configuration file.
 
-Downstream Kafka contains three topics: one that downstream.go writes to, that is read by the deduplicator and saved as a deduplicated stream of events. Any missing events are identified by the key they should have by the gap-detector and those gaps are reported to the third Kafka topic downstream.
+Downstream Kafka contains three topics: one that downstream writes to, that is read by the deduplicator and saved as a deduplicated stream of events. Any missing events are identified by the key they should have by the gap-detector and those gaps are reported to the third Kafka topic downstream.
 The first topic may contain duplicates but the one from the deduplicator should very rarely contain duplicates. Consume the gap-detector output topic, and send to your SIEM of choice. The data sent from Kafka upstream to Kafka downstream is treated as bytes and not strings, so any string encoding in upstream should be present in the final Kafka topic. Binary data, like files and images are also acceptable payloads to the downstream Kafka.
 
 ## Getting started
@@ -62,13 +62,13 @@ To enable users to get started without Kafka and without hardware diode, use the
 These properties files are configured for getting a few random strings instead of reading from Kafka and to send with UDP without encyption. Change the targetIP in upstream3.properties to the one you would like to send to. The targetIP in downstream3.properties is set to 0.0.0.0 so it will bind to all local addresses.
 
 In one terminal, start the server with:
-```
-go run src/downstream/downstream.go config/downstream.properties
+```bash
+go run src/cmd/downstream/main.go config/downstream.properties
 ```
 
 In a new terminal, start the client (sender) with:
-```
-go run src/upstream/upstream.go config/upstream.properties
+```bash
+go run src/cmd/upstream/main.go config/upstream.properties
 ```
 A few messages should now be sent from upstream and received by downstream. From here, add encryption and connections to Kafka to enable all features.
 
@@ -84,14 +84,14 @@ Downstrem should receive UDP data (encrypted and unencrypted) and write events t
 On downstream startup, a file glob is read from the configuration file. When a key exchange message is received, the file glob is used to load all private key files that matches the glob. The encrypted message is decrypted with all the private keys until one succeeds. To know if an encryption was successful or not, the symmetric key that upstream sends is prepended with a known string before encryption, a so called guard. When the decrypted message starts with the guard, the rest is used as the new symmetric key. Downstream writes the events to the downstream Kafka with the upstream Kafka topic name, partition id and position as the downstream key. The name of the downstream Kafka topic downstream writes to is configurable. That topic is then consumed by gap-detection.
 
 #### Performance
-UDP receive is normally faster than Kafka writes. The downstream application tries to safeguard against lost packets by using a lightweight thread that receives events, decrypts them using AES256 (quite fast) and then adds the events to an array. Another thread consumes the array and writes to Kafka using the async protocol (that also returns immediately and processes the write in yet another thread). If the performance is not enough, first try to add nodes to the Kafka cluster and add the nodes to the bootstrapServers configuration in the downstream process. You can also try to add several events together before writing them to the upstream Kafka, since there is some overhead for each Kafka event, especially for writing. As a last resort, the upstream sender can be set to throttle (no code for that yet), e.g., by adding a small time.Sleep after each sent event. You should be able to securely transmit tens of thousand events every second using one transmission chain, but for large installations you might have to add more sender/receiver chains, as well as upgrade the Kafka instances.
+UDP receive is normally faster than Kafka writes. The downstream application tries to safeguard against lost packets by using a lightweight thread that receives events, decrypts them using AES256 (quite fast) and then adds the events to an array. Another thread consumes the array and writes to Kafka using the async protocol (that also returns immediately and processes the write in yet another thread). If the performance is not enough, first try to add nodes to the Kafka cluster and add the nodes to the bootstrapServers configuration in the downstream process. You can also try to add several events together before writing them to the upstream Kafka, since there is some overhead for each Kafka event, especially for writing. As a last resort, the upstream sender can be set to throttle (eps property), e.g., by adding a small time.Sleep after each sent event. You should be able to securely transmit tens of thousand events every second using one transmission chain, but for large installations you might have to add more sender/receiver chains, as well as upgrade the Kafka instances.
 
 ### Automatic resend
 Since UDP is an unreliable protocol, you can set up air-gap to automatically resend logs at specific time intervals. In the upstream property file, add the following property:
 `sendingThreads=[{"Name": seconds-delay}, ... ]`
 
 Example:
-```
+```bash
 groupID=testGroup
 sendingThreads=[{"now": 0}, {"3minutes-ago": -180}]
 ```
@@ -144,7 +144,7 @@ For information about Kafka and TLS, see e.g., https://dev.to/davidsbond/golang-
 ### Upstream
 The upstream OS must be configured for static route and arp for the ip address used to send UDP. Upstream will need both a public key and a configuration file with the following properties:
 
-```properties
+```bash
 id=Upstream_1
 nic=en0
 targetIP=127.0.0.1
@@ -185,17 +185,18 @@ export AIRGAP_UPSTREAM_TARGET_IP=255.255.255.255
 |--------------------------|--------------------------|---------------|-------------|
 | id                       | AIRGAP_UPSTREAM_ID       |               | Name of the instance. Will be used in logging and when sending status messages |
 | logLevel                  | AIRGAP_UPSTREAM_LOG_LEVEL  | info         | debug, info, error, warn, fatal |
-| soruce                  | AIRGAP_UPSTREAM_SOURCE  |          | kafka or random |
+| soruce                  | AIRGAP_UPSTREAM_SOURCE  | random         | Where to get the information to send. kafka or random. Random is just a string with a counter at the end, not really random data. |
 | nic                      | AIRGAP_UPSTREAM_NIC      |               | What nic to use for sending to downstream |
 | targetIP                 | AIRGAP_UPSTREAM_TARGET_IP  |               | Downstream air-gap ip address, if IPv6, enclose the address with brackets, like [::1] |
 | targetPort               | AIRGAP_UPSTREAM_TARGET_PORT |               | Downstream air-gap ip port |
 | bootstrapServers         | AIRGAP_UPSTREAM_BOOTSTRAP_SERVERS |               | Bootstrap url for Kafka, with port |
 | topic                    | AIRGAP_UPSTREAM_TOPIC    |               | Topic name in Kafka to read from |
 | groupID                  | AIRGAP_UPSTREAM_GROUP_ID |               | The prefix for the group to use when reading from Kafka. The complete group id will be this value, concatenated with the name from the sendingThreads. This will give each sending thread a unique group id |
-| mtu                      | AIRGAP_UPSTREAM_MTU      | 0             | 0 - ask the NIC for the MTU, else enter a positive integer |
+| payloadSize              | AIRGAP_UPSTREAM_PAYLOAD_SIZE | 0             | 0 - ask the NIC for the MTU and subtract 68 bytes from that (IPv6 + UDP header) or set manually to the payload size (available size of UDP packets, i.e., MTU - headers) |
 | from                     | AIRGAP_UPSTREAM_FROM     |               | Don't read anything from Kafka that was delivered to Kafka before this timestamp |
 | enryption                | AIRGAP_UPSTREAM_ENCRYPTION | false       | true - encrypt all payload when sending to downstream air-gap. Status messages are still in clear text to help configuration and set-up |
 | publicKeyFile            | AIRGAP_UPSTREAM_PUBLIC_KEY_FILE |               | If encryption is on, this is the public key of the receiver |
+| source                   | AIRGAP_UPSTREAM_SOURCE.         | random        | source of the messages, kafka or random. Use random for testing only |
 | generateNewSymmetricKeyEvery | AIRGAP_UPSTREAM_GENERATE_NEW_SYMMETRIC_KEY_EVERY |               | How often should we change the encryption key (symmetric key)? |
 | logFileName              | AIRGAP_UPSTREAM_LOG_FILE_NAME |          | If configured, all logs will be written to this file instead of the console. This will take effekt after the configuration is read and no errors occurs |
 | sendingThreads           | AIRGAP_UPSTREAM_SENDING_THREADS | {"now": 0} | How many times, and when, whould we send each event? |
@@ -203,6 +204,9 @@ export AIRGAP_UPSTREAM_TARGET_IP=255.255.255.255
 | keyFile                  | AIRGAP_UPSTREAM_KEY_FILE  |               | The private key for the certFile certificate |
 | caFile                   | AIRGAP_UPSTREAM_CA_FILE   |               | The CA that issued the Kafka server's certificate |
 | deliverFilter            | AIRGAP_UPSTREAM_DELIVER_FILTER |               | Filter so not all events from Kafka is sent. Can be used to enable load balancing (see Load Balancing chapter below) |
+| topicTranslations        | AIRGAP_UPSTREAM_TOPIC_TRANSLATIONS |              | If you need to rename a topic before sending the messages you can use this: `{"inputTopic1":"outputTopic1","inputTopic2":"outputTopic2"}`. Here, if the name of a topic upstreams is `inputTopic1` it will be sent as `outputTopic1` from upstream |
+| logStatistics                   | AIRGAP_UPSTREAM_LOG_STATISTICS  | 0             | How often should a statistics event be written to the console or log file. Valus is in seconds. 0 - no logging |
+| compressWhenLengthExceeds | AIRGAP_UPSTREAM_COMPRESS_WHEN_LOG_EXCEEDS | 0           | Using compression (gzip) on short events can make them longer. The break-even length is around 100 bytes for the gzip compression. Set this to a value (ideally above 1200) to gzip longer events |
 
 ### Removed settings
 | Config file property name | Environment variable name | Default value | Description |
@@ -216,7 +220,7 @@ The same configuration file is used for set-timestamp. set-timestamp uses the bo
 ### Downstream
 Downstream has a similar configuration file as upstream
 
-```properties
+```bash
 id=Downstream_1
 nic=en0
 targetIP=127.0.0.1
@@ -244,13 +248,59 @@ The property privateKeyFiles should point to one or more private key files that 
 | topic                    | AIRGAP_DOWNSTREAM_TOPIC    |               | Topic name in Kafka to write to (internal logging). Topic name for events from the upstream topics will have the same name as the upstream topic, if not translated by the setting AIRGAP_DOWNSTREAM_TOPIC_TRANSLATIONS |
 | clientId                 | AIRGAP_DOWNSTREAM_CLIENT_ID    |               | Id to use when writing to Kafka |
 | mtu                      | AIRGAP_DOWNSTREAM_MTU      | 0             | 0 - ask the NIC for the MTU, else enter a positive integer |
-| target                   | AIRGAP_DOWNSTREAM_TARGET   | kafka         | kafka or cmd are valid values |
+| target                   | AIRGAP_DOWNSTREAM_TARGET   | kafka         | kafka, cmd and null are valid values. cmd will print the output to the console, null will just forget the received message but collect statistics of received events to calculate EPS when terminated. |
 | privateKeyFiles          | AIRGAP_DOWNSTREAM_PRIVATE_KEY_FILES |               | Glob covering all private key files to load |
 | logFileName              | AIRGAP_DOWNSTREAM_LOG_FILE_NAME |          | If configured, all logs will be written to this file instead of the console. This will take effekt after the configuration is read and no errors occurs |
 | certFile                 | AIRGAP_DOWNSTREAM_CERT_FILE |               | For TLS to Kafka, add a certificate pem encoded file here |
 | keyFile                  | AIRGAP_DOWNSTREAM_KEY_FILE  |               | The private key for the certFile certificate |
 | caFile                   | AIRGAP_DOWNSTREAM_CA_FILE   |               | The CA that issued the Kafka server's certificate |
 | topicTranslations        | AIRGAP_DOWNSTREAM_TOPIC_TRANSLATIONS |            | Rename topics with a specified name to another name. Used in multi downstreams setup (see Redundancy and Load Balancing.md) |
+| logStatistics            | AIRGAP_DOWNSTREAM_LOG_STATISTICS  | 0             | How often should a statistics event be written to the console or log file. Valus is in seconds. 0 - no logging |
+| numReceivers             | AIRGAP_DOWNSTREAM_NUM_RECEIVERS   | 1             | Number of UDP receivers to start that concurrently binds to the targetPort |
+| channelBufferSize        | AIRGAP_DOWNSTREAM_CHANNEL_BUFFER_SIZE   | 16384   | Size of the buffered Go channel used between the UDP socket reader goroutines and the worker goroutines in the UDP receiver. It determines how many UDP packets can be queued in memory between being read from the socket and being processed. |
+| batchSize                | AIRGAP_DOWNSTREAM_BATCH_SIZE  | 32            | How many messages are grouped together and sent to Kafka in a single batch |
+| readBufferMultiplier     | AIRGAP_DOWNSTREAM_READ_BUFFER_MULTIPLIER | 16     | Size of the user-space buffer allocated for each UDP socket read operation. The buffer size is calculated as: `buffer size = mtu * readBufferMultiplier` |
+| rcvBufSize               | AIRGAP_DOWNSTREAM_RCV_BUF_SIZE              | 4194304 (4MiB) | Size (in bytes) of the OS-level receive buffer for each UDP socket, set via the SO_RCVBUF socket option. It controls how much incoming UDP data the kernel can buffer for the application before packets are dropped due to the application not reading fast enough. |
+
+### Configuration
+numReceivers can be set to 10 or more to bind several threads to the same port. The kernel will distribute the events evenly (at least if the numReceivers is divisable by 5). If two downstream are started with the same configuration, the second started will act as a hot stand-by.
+
+For high throughput on high-end servers, set the numReceivers, channelBufferSize, batchSize, readBufferMultiplier and rcvBufSize to:
+
+#### High-volume UDP-Kafka receiver configuration example
+```bash
+id=Downstream_HighPerf
+nic=enp1s0                # Use a high-performance NIC if available
+targetIP=0.0.0.0          # Bind to all interfaces
+targetPort=1234           # Use your desired UDP port
+bootstrapServers=192.168.153.138:9092
+topic=log
+privateKeyFiles=certs/private*.pem
+target=kafka
+mtu=auto
+clientId=downstream
+logLevel=INFO
+logFileName=downstream.log
+```
+
+#### High-performance tuning parameters:
+```bash
+numReceivers=10               # Number of UDP receiver goroutines (match to CPU cores)
+channelBufferSize=65536       # Size of Go channel buffer between UDP and Kafka. Large buffer to absorb UDP bursts.
+batchSize=128                 # Number of messages to batch per Kafka write. Larger batches improve Kafka throughput.
+readBufferMultiplier=32       # User-space UDP read buffer (mtu * multiplier). Larger user-space buffer for big UDP packets.
+rcvBufSize=16777216           # OS UDP socket buffer (16 MiB). Large OS buffer to minimize packet loss under load.
+logStatistics=5               # Log stats every 5 seconds
+```
+
+To test the UDP sender/receiver, use the normal binaries with the following configuration:
+```bash
+downstream config/downstreap-perf.properties
+
+upstream config/upstream-perf.properties
+```
+
+This will generate events automatically in upstream, with a sequence number, send those to downstream that will discard the events but count how many was received and time from first receive to Ctrl-C. Terminate downstream when you don't want to measure any longer and the eps and total number of received events will be displayed. Terminate upstream after downstream.
 
 ### Deduplicator and Gap Detector
 Deduplicator and Gap Detector is covered in the [Deduplication.md](doc/Deduplication.md) documentation
@@ -281,8 +331,8 @@ Compile the applications with `go build {filename}`.
 
 Example:
 ```bash
-cd src/upstream
-go build upstream.go
+cd src/cmd/upstream
+go build -o upstream main.go
 ```
 
 Now we have a compiled file called `upstream`. We can run the application with `./upstream`, but you will still need a configuration file.
@@ -401,6 +451,11 @@ sudo systemctl start upstream
 ### Downstream
 Downstream can be run as a service in the same manner as upstream.
 
+### Create
+The `create` application is used to create resend bundle files that contain information of missing events. The bundle should be transferred to the upstream network and consumed by the `resend` application. This application can not be run as a service. The application will terminate when the gaps are exported to the file.
+
+### Resend
+The `resend` application is used to either consume resend bundles created by the `create` application, or resend everything from a specified timestamp. The application can not be run as a service. The application will terminate when the information has been resent for all partitions.
 
 ## Dependencies
 air-gap uses IBM/sarama for the Kafka read/write. For other dependencies, check the go.mod file.
@@ -409,6 +464,15 @@ air-gap uses IBM/sarama for the Kafka read/write. For other dependencies, check 
 See LICENSE file
 
 # Release Notes
+
+## 0.1.5-SNAPSHOT
+* Multiple sockets with SO_REUSEPORT for faster and more reliable UDP receive in Linux and Mac for downstream. Fallback to single thread in Windows.
+* `create` application to create resend bundle files downstream
+* `resend` application to resend missing events from the resend bundle created by `create`
+* `compressWhenLengthExceeds` setting for upstream and resend to compress messages when length exceeds this value. As of now gzip is the only supported algorithm.
+* More configuration for upstream and downstream for buffer size optimizations
+* Upstream and downstream can translate topic names to other names. Useful in multi source and/or target setups.
+* Statistics logging in upstream, downstream and dedup
 
 ## 0.1.4-SNAPSHOT
 * Changed the logging for the go applications to include log levels. Monitoring and log updates. 

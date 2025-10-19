@@ -57,7 +57,7 @@ public class JmxSupport {
                 GapDetector gd = gapDetectors.get(base);
                 if (gd == null) throw new AttributeNotFoundException(attribute);
                 String result = gd.getAllCompactGaps().toString();
-                LOG.info("Gaps for {}: {}", base, result);
+                LOG.debug("Gaps for {}: {}", base, result);
                 return result;
             }
             if (attribute.endsWith("_mem")) {

@@ -11,7 +11,8 @@ import (
 type LogLevel int
 
 const (
-	DEBUG LogLevel = iota
+	TRACE LogLevel = iota
+	DEBUG
 	INFO
 	WARN
 	ERROR
@@ -32,6 +33,13 @@ var Logger = &LoggerType{}
 // Quick check to see if we can log in some level
 func (l *LoggerType) CanLog(level LogLevel) bool {
 	return logLevel <= level
+}
+
+// Non-formatted log methods (like log.Print)
+func (l *LoggerType) Trace(msg string) {
+	if logLevel <= TRACE {
+		logger.Print("[TRACE] " + msg)
+	}
 }
 
 // Non-formatted log methods (like log.Print)
@@ -77,6 +85,11 @@ func (l *LoggerType) Fatal(v interface{}) {
 }
 
 // Formatted log wrappers (like log.Printf)
+func (l *LoggerType) Tracef(format string, v ...interface{}) {
+	if logLevel <= TRACE {
+		logger.Printf("[TRACE] "+format, v...)
+	}
+}
 func (l *LoggerType) Debugf(format string, v ...interface{}) {
 	if logLevel <= DEBUG {
 		logger.Printf("[DEBUG] "+format, v...)
@@ -110,9 +123,9 @@ func (l *LoggerType) Print(str string) {
 		logger.Print("[INFO] " + str)
 	}
 }
-func (l *LoggerType) Println(v ...interface{}) {
+func (l *LoggerType) Println(format string, v ...interface{}) {
 	if logLevel <= INFO {
-		logger.Println(v...)
+		logger.Printf("[INFO] "+format, v...)
 	}
 }
 
@@ -140,6 +153,8 @@ func (l *LoggerType) SetLogLevel(level string) {
 		logLevel = INFO
 	case "DEBUG":
 		logLevel = DEBUG
+	case "TRACE":
+		logLevel = TRACE
 	default:
 		logLevel = INFO
 	}
@@ -158,6 +173,8 @@ func (l *LoggerType) GetLogLevel() string {
 		return "INFO"
 	case DEBUG:
 		return "DEBUG"
+	case TRACE:
+		return "TRACE"
 	default:
 		return "INFO"
 	}

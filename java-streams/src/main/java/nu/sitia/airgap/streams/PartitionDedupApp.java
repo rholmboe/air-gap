@@ -1,4 +1,3 @@
-
 package nu.sitia.airgap.streams;
 
 // File: PartitionDedupApp.java
@@ -40,9 +39,11 @@ import org.apache.kafka.streams.processor.Cancellable;
 
 import nu.sitia.airgap.gapdetector.GapDetector;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -61,12 +62,14 @@ public class PartitionDedupApp {
     // SLF4J logger for this class
     private static final Logger LOG = LoggerFactory.getLogger(PartitionDedupApp.class);
     // Support multiple input topics for Merge/Fan-in pattern
-    public static final String RAW_TOPICS = System.getenv().getOrDefault("RAW_TOPICS", "transfer-12a");
+    public static final String RAW_TOPICS = System.getenv().getOrDefault("RAW_TOPICS", "transfer");
     public static final String CLEAN_TOPIC = System.getenv().getOrDefault("CLEAN_TOPIC", "dedup");  // deduped output topic
     public static final String GAP_TOPIC = System.getenv().getOrDefault("GAP_TOPIC", "gaps");     // gap notifications topic
     public static final String BOOTSTRAP_SERVERS = System.getenv().getOrDefault("BOOTSTRAP_SERVERS", "kafka-downstream.sitia.nu:9092");
-    public static final String STATE_DIR_CONFIG = System.getenv().getOrDefault("STATE_DIR_CONFIG", "/tmp/var/lib/kafka-streams/state2");
+    public static final String STATE_DIR_CONFIG = System.getenv().getOrDefault("STATE_DIR_CONFIG", "/tmp/var/lib/kafka-streams/state");
     public static final String APPLICATION_ID = System.getenv().getOrDefault("APPLICATION_ID", "dedup-gap-app");
+    // Allow commit interval to be set via env var (default 5 seconds)
+    public static final long COMMIT_INTERVAL_MS = Long.parseLong(System.getenv().getOrDefault("COMMIT_INTERVAL_MS", "5000"));
 
 //    public static final String STORE_SEEN = "seen-offsets-store"; // key: Long offset, value: byte (marker)
     public static final String STORE_GAP = "gap-tracker-store";   // gap detector needs its own state
@@ -74,6 +77,9 @@ public class PartitionDedupApp {
 
     // Persistence interval in milliseconds (configurable)
     public static final long PERSIST_INTERVAL_MS = Long.parseLong(System.getenv().getOrDefault("PERSIST_INTERVAL_MS", "5000"));
+
+    // Add environment variable for missing event reporting interval
+    public static final long MISSING_REPORT_INTERVAL_SEC = Long.parseLong(System.getenv().getOrDefault("MISSING_REPORT_INTERVAL_SEC", "60"));
 
     /**
      * JMX MBean interface for exposing the Properties (props) variable
@@ -136,7 +142,7 @@ public class PartitionDedupApp {
         public String getApplicationId() { return props.getProperty(StreamsConfig.APPLICATION_ID_CONFIG, "dedup-gap-app"); }
         public int getNumStreamThreads() { return Integer.parseInt(props.getProperty(StreamsConfig.NUM_STREAM_THREADS_CONFIG, "1")); }
         public int getNumStandbyReplicas() { return Integer.parseInt(props.getProperty(StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG, "1")); }
-        public int getCommitIntervalMs() { return Integer.parseInt(props.getProperty(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, "500")); }
+        public int getCommitIntervalMs() { return Integer.parseInt(props.getProperty(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, "60000")); }
         public String getProcessingGuarantee() { return props.getProperty(StreamsConfig.PROCESSING_GUARANTEE_CONFIG, "exactly_once_v2"); }
         public int getGapEmitIntervalSec() { return Integer.parseInt(GAP_EMIT_INTERVAL_SEC); }
         public long getPersistIntervalMs() { return PERSIST_INTERVAL_MS; }
@@ -201,7 +207,7 @@ public class PartitionDedupApp {
     props.put(StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG, 1);
 
     // Optional: commit interval (EOS v2 ignores this for transactional commits)
-    props.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, 500);
+    props.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, COMMIT_INTERVAL_MS);
 
         LOG.info("Starting PartitionDedupApp with config: {}", props);;
         LOG.info("BOOTSTRAP_SERVERS={}", BOOTSTRAP_SERVERS);
@@ -226,15 +232,34 @@ public class PartitionDedupApp {
 
         // Build topology
         Topology topology = buildTopology();
-        KafkaStreams streams = new KafkaStreams(topology, props);
+        try (KafkaStreams streams = new KafkaStreams(topology, props)) {
+            // Add shutdown hook
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                LOG.info("Shutdown hook triggered: closing Kafka Streams...");
+                streams.close(Duration.ofSeconds(10));
+                LOG.info("Kafka Streams closed.");
+            }));
 
-        // Attach shutdown hook
-        Runtime.getRuntime().addShutdownHook(new Thread(streams::close));
+            streams.start();
+            LOG.info("PartitionDedupApp started and running. Main thread will now exit, process will be kept alive by Kafka Streams threads.");
+            // Optionally, print store metadata for debugging
+            Collection<org.apache.kafka.streams.StreamsMetadata> storeMetadata = streams.streamsMetadataForStore(STORE_GAP);
+            LOG.info("All metadata for store {}: {}", STORE_GAP, storeMetadata);
 
-        streams.start();
-
-        Collection<org.apache.kafka.streams.StreamsMetadata> storeMetadata = streams.streamsMetadataForStore(STORE_GAP);
-        LOG.info("All metadata for store {}: {}", STORE_GAP, storeMetadata);
+            // Block main thread until shutdown
+            final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+            Runtime.getRuntime().addShutdownHook(new Thread("streams-shutdown-hook") {
+                @Override
+                public void run() {
+                    latch.countDown();
+                }
+            });
+            try {
+                latch.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     
@@ -308,6 +333,15 @@ public class PartitionDedupApp {
         private Cancellable persistSchedule;
         private Cancellable emitSchedule;
 
+        private static final Map<Integer, Long> lastTotalMissing = new java.util.concurrent.ConcurrentHashMap<>();
+        private static final Map<Integer, Long> lastReceived = new java.util.concurrent.ConcurrentHashMap<>();
+        private static final Map<Integer, Long> lastEmitted = new java.util.concurrent.ConcurrentHashMap<>();
+        private static final Map<Integer, Long> totalReceived = new java.util.concurrent.ConcurrentHashMap<>();
+        private static final Map<Integer, Long> totalEmitted = new java.util.concurrent.ConcurrentHashMap<>();
+    // Removed unused reportScheduled field
+        // Use the shared ObjectMapper instance for reporting
+        private static final ObjectMapper REPORT_MAPPER = new ObjectMapper();
+
         public DedupAndGapProcessor() {
             this.persistIntervalMs = PERSIST_INTERVAL_MS;
             this.windowSize = WINDOW_SIZE;
@@ -367,6 +401,13 @@ public class PartitionDedupApp {
                 org.apache.kafka.streams.processor.PunctuationType.WALL_CLOCK_TIME,
                 ts -> emitGapsForPartition(partition)
             );
+
+            // Schedule missing-report once per partition
+            context.schedule(
+                java.time.Duration.ofSeconds(MISSING_REPORT_INTERVAL_SEC),
+                org.apache.kafka.streams.processor.PunctuationType.WALL_CLOCK_TIME,
+                ts -> logMissingEventsForThisPartition()
+            );
         }
 
         @Override
@@ -404,29 +445,28 @@ public class PartitionDedupApp {
                 GapDetector detector = entry.getValue();
                 LOG.debug("GapDetector address for key {}: {}", key, System.identityHashCode(detector));
                 // Log total missing count for this partition
-                LOG.info("Partition {}: Total missing messages detected: {}", partition, detector.getMissingCounts());
+                LOG.debug("Partition {}: Total missing messages detected: {}", partition, detector.getMissingCounts());
 
                 List<GapDetector.Window> windows = detector.getWindows();
                 // For all windows, find gaps
                 // Sticky empty emission logic: emit empty gaps once when gaps become empty, reset if non-empty
                 for (GapDetector.Window window : windows) {
                     List<List<Long>> gaps = window.findGapsFiltered(detector.getMinReceived());
-                    String gapKey = topic + "_" + partition + ":" + window.getMinOffset();
-                    // Use a static or instance map to track last non-empty state per window
+                    long windowMin = window.getMinOffset();
+                    String gapKey = topic + "_" + partition + ":" + windowMin;
                     if (window.lastEmittedNonEmpty == null) window.lastEmittedNonEmpty = new boolean[]{true};
                     boolean wasNonEmpty = window.lastEmittedNonEmpty[0];
                     if (!gaps.isEmpty() || wasNonEmpty) {
-                        // Normal emission
                         try {
                             Map<String, Object> gapsMap = new HashMap<>();
                             gapsMap.put("topic", topic);
                             gapsMap.put("partition", partition);
-                            gapsMap.put("window_min", window.getMinOffset());
+                            gapsMap.put("window_min", windowMin);
                             gapsMap.put("window_max", window.getMaxOffset());
                             gapsMap.put("gaps", gaps);
                             String json = MAPPER.writeValueAsString(gapsMap);
                             context.forward(new Record<>(gapKey, json.getBytes(), System.currentTimeMillis()), "gaps-sink");
-                            LOG.info("Emitted gaps for window {}: {}", gapKey, json);
+                            LOG.debug("Emitted gaps for window {}: {}", gapKey, json);
                         } catch (Exception e) {
                             LOG.error("Failed to serialize gaps for window {}", gapKey, e);
                         }
@@ -438,7 +478,6 @@ public class PartitionDedupApp {
 
         @Override
         public void process(org.apache.kafka.streams.processor.api.Record<String, byte[]> record) {
-
             String key = record.key();
             byte[] value = record.value();
             if (key == null) return; // nothing we can do
@@ -457,12 +496,15 @@ public class PartitionDedupApp {
                 offset = Long.parseLong(parts[2]);
             } catch (Exception e) {
                 // Not a topic_partition_offset key, deliver with no gap detection
-                LOG.info("Non-standard key format '{}', forwarding directly to deduped-sink", key);
+                LOG.debug("Non-standard key format '{}', forwarding directly to deduped-sink", key);
                 context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
                 return;
             }
-            LOG.info("Processing record from topic={}, partition={}, offset={}", topic, partition, offset);
+            LOG.debug("Processing record from topic={}, partition={}, offset={}", topic, partition, offset);
             String topicPartition = topic + "_" + partition;
+
+            // Increment received counter
+            totalReceived.merge(partition, 1L, Long::sum);
 
             GapDetector gapDetector = gapDetectors.get(topicPartition);
             if (gapDetector == null) {
@@ -475,29 +517,25 @@ public class PartitionDedupApp {
                 LOG.info("Re-registered Processor MBean after adding new partition: {}. Current keys: {}", topicPartition, gapDetectors.keySet());
             }
 
-            boolean alreadyReceived = gapDetector.check(offset, window -> {
-                // Always use topic from event key for gap emission
+            int alreadyReceived = gapDetector.check(offset, window -> {
                 try {
                     List<List<Long>> gaps = window.findGaps();
-                    //  Create a key for the gaps topic. The key is topic_partition_window-min
+                    long windowMin = window.getMinOffset();
                     if (!gaps.isEmpty()) {
-                        String gapKey = topic + "_" + partition + ":" + window.getMinOffset();
+                        String gapKey = topic + "_" + partition + ":" + windowMin;
                         Map<String, Object> gapsMap = new HashMap<>();
                         gapsMap.put("topic", topic);
                         gapsMap.put("partition", partition);
-                        gapsMap.put("window_min", window.getMinOffset());
+                        gapsMap.put("window_min", windowMin);
                         gapsMap.put("window_max", window.getMaxOffset());
                         gapsMap.put("gaps", gaps);
-                        
                         String json = MAPPER.writeValueAsString(gapsMap);
-
                         context.forward(new Record<>(gapKey, json.getBytes(), record.timestamp()), "gaps-sink");
-                        LOG.info("Emitted gaps for window {}: {}", gapKey, json);
+                        LOG.debug("Emitted gaps for window {}: {}", gapKey, json);
                     }
                 } catch (OutOfMemoryError oom) {
                     String errorMessage = "OutOfMemoryError while emitting gaps for purged window. Consider increasing MAX_WINDOWS or reducing WINDOW_SIZE. " + oom;
                     LOG.error(errorMessage);
-                    // Generate a new key and emit to deduped-sink to avoid losing the record
                     String dedupedKey = key + ":oom";
                     context.forward(new Record<>(dedupedKey, errorMessage.getBytes(), record.timestamp()), "deduped-sink");
                 } catch (Exception e) {
@@ -505,11 +543,65 @@ public class PartitionDedupApp {
                 }
             });
 
-            if (alreadyReceived) {
-                LOG.warn("Key already seen {}", key);
-            } else {
-                LOG.info("Forwarding unique key {}", key);
+            // * alreadyReceived is 1 if this number was already received, 0 if it’s newly received and -1 if it fills a gap.
+            // * If the number is less than the lowest known offset, it is considered unseen and -2 is returned.
+            if (alreadyReceived == 1) {
+                LOG.debug("Key already seen {}", key);
+            } else if (alreadyReceived == 0) {
+                LOG.debug("Forwarding unique key {}", key);
                 context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
+                totalEmitted.merge(partition, 1L, Long::sum);
+            } else if (alreadyReceived == -1) {
+                LOG.debug("Key {} fills a gap, forwarding", key);
+                context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
+                totalEmitted.merge(partition, 1L, Long::sum);
+            } else if (alreadyReceived == -2) {
+                LOG.info("Key {} is below known range, forwarding", key);
+                context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
+                totalEmitted.merge(partition, 1L, Long::sum);
+            } else {
+                LOG.error("Unexpected return value {} from gapDetector.check for key {}", alreadyReceived, key);
+            }
+        }
+
+        /**
+         * Log missing event stats for all handled partitions in this instance as JSON.
+         */
+        private void logMissingEventsForThisPartition() {
+            int part = this.partition;
+            Map<String, Object> report = new LinkedHashMap<>();
+            report.put("report_time", System.currentTimeMillis());
+            report.put("partition", part);
+
+            long totalMissing = 0;
+            for (GapDetector gd : gapDetectors.values()) {
+                totalMissing += gd.getMissingCounts();
+            }
+
+            long deltaMissing = totalMissing - lastTotalMissing.getOrDefault(part, 0L);
+            lastTotalMissing.put(part, totalMissing);
+
+            long received = totalReceived.getOrDefault(part, 0L);
+            long deltaReceived = received - lastReceived.getOrDefault(part, 0L);
+            lastReceived.put(part, received);
+
+            long emitted = totalEmitted.getOrDefault(part, 0L);
+            long deltaEmitted = emitted - lastEmitted.getOrDefault(part, 0L);
+            lastEmitted.put(part, emitted);
+
+            report.put("total_missing", totalMissing);
+            report.put("delta_missing", deltaMissing);
+            report.put("total_received", received);
+            report.put("delta_received", deltaReceived);
+            report.put("total_emitted", emitted);
+            report.put("delta_emitted", deltaEmitted);
+            report.put("eps", deltaReceived / MISSING_REPORT_INTERVAL_SEC);
+
+            try {
+                String json = REPORT_MAPPER.writeValueAsString(List.of(report));
+                LOG.info("[MISSING-REPORT] {}", json);
+            } catch (Exception e) {
+                LOG.error("Failed to serialize missing report JSON", e);
             }
         }
 

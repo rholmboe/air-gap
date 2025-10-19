@@ -13,46 +13,79 @@ BUILD_LDFLAGS := -X 'main.BuildNumber=$(NEXT_BUILD_NUMBER)'
 
 .PHONY: java
 
-all: upstream downstream upstream-linux-arm64 upstream-linux-amd64 downstream-linux-arm64 downstream-linux-amd64 java
+all: upstream downstream upstream-linux-arm64 upstream-linux-amd64 downstream-linux-arm64 downstream-linux-amd64 create create-linux-arm64 create-linux-amd64 resend resend-linux-arm64 resend-linux-amd64 java
+
 java:
 	cd java-streams && mvn clean package
 
 src/version/version.go:
 	git fetch --tags
-	@echo 'package version\n\nvar GitVersion = "$(GIT_VERSION)"' > src/version/version.go
+	@echo 'package version\n\nvar GitVersion = "$(GIT_VERSION)"' > ./src/version/version.go
 
-
-upstream: src/version/version.go src/upstream/upstream.go
+upstream: src/version/version.go src/cmd/upstream/main.go
 	mkdir -p ./target
-	go build -ldflags '$(BUILD_LDFLAGS)' -o ./target/upstream src/upstream/upstream.go
+	go build -ldflags '$(BUILD_LDFLAGS)' -o ./target/upstream ./src/cmd/upstream
+	@echo $(NEXT_BUILD_NUMBER) > $(BUILD_NUMBER_FILE)
+	
+upstream-linux-arm64: src/version/version.go src/cmd/upstream/main.go
+	mkdir -p ./target
+	GOOS=linux GOARCH=arm64 go build -ldflags '$(BUILD_LDFLAGS)' -o ./target/upstream-linux-arm64 ./src/cmd/upstream
+	@echo $(NEXT_BUILD_NUMBER) > $(BUILD_NUMBER_FILE)
+	chmod +x ./target/upstream-linux-arm64
+
+upstream-linux-amd64: src/version/version.go src/cmd/upstream/main.go
+	mkdir -p ./target
+	GOOS=linux GOARCH=amd64 go build -ldflags '$(BUILD_LDFLAGS)' -o ./target/upstream-linux-amd64 ./src/cmd/upstream
 	@echo $(NEXT_BUILD_NUMBER) > $(BUILD_NUMBER_FILE)
 
-upstream-linux-arm64: src/version/version.go src/upstream/upstream.go
+
+downstream: src/version/version.go src/cmd/downstream/main.go
 	mkdir -p ./target
-	GOOS=linux GOARCH=arm64 go build -ldflags '$(BUILD_LDFLAGS)' -o ./target/upstream-linux-arm64 src/upstream/upstream.go
+	go build -ldflags '$(BUILD_LDFLAGS)' -o ./target/downstream ./src/cmd/downstream
 	@echo $(NEXT_BUILD_NUMBER) > $(BUILD_NUMBER_FILE)
 
-upstream-linux-amd64: src/version/version.go src/upstream/upstream.go
+downstream-linux-arm64: src/version/version.go ./src/cmd/downstream/main.go
 	mkdir -p ./target
-	GOOS=linux GOARCH=amd64 go build -ldflags '$(BUILD_LDFLAGS)' -o ./target/upstream-linux-amd64 src/upstream/upstream.go
+	GOOS=linux GOARCH=arm64 go build -ldflags '$(BUILD_LDFLAGS)' -o ./target/downstream-linux-arm64 ./src/cmd/downstream
 	@echo $(NEXT_BUILD_NUMBER) > $(BUILD_NUMBER_FILE)
 
-downstream: src/version/version.go src/downstream/downstream.go
+downstream-linux-amd64: src/version/version.go ./src/cmd/downstream/main.go
 	mkdir -p ./target
-	go build -ldflags '$(BUILD_LDFLAGS)' -o ./target/downstream src/downstream/downstream.go
+	GOOS=linux GOARCH=amd64 go build -ldflags '$(BUILD_LDFLAGS)' -o ./target/downstream-linux-amd64 ./src/cmd/downstream
 	@echo $(NEXT_BUILD_NUMBER) > $(BUILD_NUMBER_FILE)
 
-downstream-linux-arm64: src/version/version.go src/downstream/downstream.go
+
+create: src/version/version.go src/cmd/create/main.go
 	mkdir -p ./target
-	GOOS=linux GOARCH=arm64 go build -ldflags '$(BUILD_LDFLAGS)' -o ./target/downstream-linux-arm64 src/downstream/downstream.go
+	go build -ldflags '$(BUILD_LDFLAGS)' -o ./target/create ./src/cmd/create
 	@echo $(NEXT_BUILD_NUMBER) > $(BUILD_NUMBER_FILE)
 
-downstream-linux-amd64: src/version/version.go src/downstream/downstream.go
+create-linux-arm64: src/version/version.go ./src/cmd/create/main.go
 	mkdir -p ./target
-	GOOS=linux GOARCH=amd64 go build -ldflags '$(BUILD_LDFLAGS)' -o ./target/downstream-linux-amd64 src/downstream/downstream.go
+	GOOS=linux GOARCH=arm64 go build -ldflags '$(BUILD_LDFLAGS)' -o ./target/create-linux-arm64 ./src/cmd/create
 	@echo $(NEXT_BUILD_NUMBER) > $(BUILD_NUMBER_FILE)
 
-build-all: upstream downstream upstream-linux-arm64 upstream-linux-amd64 downstream-linux-arm64 downstream-linux-amd64
+create-linux-amd64: src/version/version.go ./src/cmd/create/main.go
+	mkdir -p ./target
+	GOOS=linux GOARCH=amd64 go build -ldflags '$(BUILD_LDFLAGS)' -o ./target/create-linux-amd64 ./src/cmd/create
+	@echo $(NEXT_BUILD_NUMBER) > $(BUILD_NUMBER_FILE)
+
+resend: src/version/version.go src/cmd/resend/main.go
+	mkdir -p ./target
+	go build -ldflags '$(BUILD_LDFLAGS)' -o ./target/resend ./src/cmd/resend
+	@echo $(NEXT_BUILD_NUMBER) > $(BUILD_NUMBER_FILE)
+
+resend-linux-arm64: src/version/version.go ./src/cmd/resend/main.go
+	mkdir -p ./target
+	GOOS=linux GOARCH=arm64 go build -ldflags '$(BUILD_LDFLAGS)' -o ./target/resend-linux-arm64 ./src/cmd/resend
+	@echo $(NEXT_BUILD_NUMBER) > $(BUILD_NUMBER_FILE)
+
+resend-linux-amd64: src/version/version.go ./src/cmd/resend/main.go
+	mkdir -p ./target
+	GOOS=linux GOARCH=amd64 go build -ldflags '$(BUILD_LDFLAGS)' -o ./target/resend-linux-amd64 ./src/cmd/resend
+	@echo $(NEXT_BUILD_NUMBER) > $(BUILD_NUMBER_FILE)
+
+build-all: upstream downstream upstream-linux-arm64 upstream-linux-amd64 downstream-linux-arm64 downstream-linux-amd64 create create-linux-arm64 create-linux-amd64 resend resend-linux-arm64 resend-linux-amd64 java
 
 
 clean:

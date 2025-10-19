@@ -226,7 +226,18 @@ func (consumer *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, clai
 				Logger.Debug("Delaying message delivery on thread: " + consumer.name + " for " + sleepTime.String())
 				time.Sleep(sleepTime)
 			}
-			Logger.Debugf("Delivering message in thread %s from topic %s: key = %s, value = %s, partition = %d, offset = %d, msgTime = %s\n", consumer.name, message.Topic, string(message.Key), string(message.Value), message.Partition, message.Offset, message.Timestamp)
+			// Debug output the first 80 characters of the message. If the message is truncated, show ...
+			maxLen := 80
+			var payload string
+			if len(message.Value) < maxLen {
+				payload = string(message.Value)
+			} else {
+				payload = string(message.Value[0:maxLen]) + "..."
+			}
+			Logger.Debugf("Message on thread %s: topic=%s partition=%d offset=%d timestamp=%s key=%s value=%s",
+				consumer.name, message.Topic, message.Partition, message.Offset, message.Timestamp.String(),
+				string(message.Key), payload)
+
 			id := message.Topic + delimiter +
 				fmt.Sprint(message.Partition) + delimiter +
 				fmt.Sprint(message.Offset)
@@ -240,5 +251,166 @@ func (consumer *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, clai
 		}
 	}
 	// shutting down
+	return nil
+}
+
+func ReadToEnd(ctx context.Context, brokers string, topic string, group string,
+	callbackFunction func(string, []byte, time.Time, []byte) bool) error {
+	partition := -1 // all partitions
+	return ReadToEndPartition(partition, ctx, brokers, topic, group, 0, callbackFunction)
+}
+
+// ReadToEndPartition reads all available messages from the topic and exits when done.
+// If partition >= 0, only reads the specified partition; otherwise, reads all partitions.
+func ReadToEndPartition(partition int, ctx context.Context, brokers string, topic string, group string, fromOffset int64,
+	callbackFunction func(string, []byte, time.Time, []byte) bool) error {
+
+	Logger.Printf("Starting ReadToEnd for topic %s and partition %d", topic, partition)
+
+	version, err := sarama.ParseKafkaVersion(sarama.DefaultVersion.String())
+	if err != nil {
+		return err
+	}
+
+	config := sarama.NewConfig()
+	config.Version = version
+	config.ClientID = "readtoend"
+	if tlsConfigParameters != nil {
+		Logger.Println("Enabling TLS configuration for Kafka consumer")
+		tlsConfig, err := createTLSConfig()
+		if err != nil {
+			return err
+		}
+		config.Net.TLS.Enable = true
+		config.Net.TLS.Config = tlsConfig
+	}
+	config.Consumer.Offsets.Initial = sarama.OffsetOldest
+
+	client, err := sarama.NewClient(strings.Split(brokers, ","), config)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	consumer, err := sarama.NewConsumerFromClient(client)
+	if err != nil {
+		return err
+	}
+	defer consumer.Close()
+
+	partitions, err := consumer.Partitions(topic)
+	if err != nil {
+		return err
+	}
+
+	var targetPartitions []int32
+	if partition >= 0 {
+		// Only process the specified partition
+		found := false
+		for _, p := range partitions {
+			if int(p) == partition {
+				targetPartitions = []int32{p}
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("partition %d not found in topic %s", partition, topic)
+		}
+	} else {
+		// Process all partitions
+		targetPartitions = partitions
+	}
+
+	for _, partition := range targetPartitions {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		newestOffset, err := client.GetOffset(topic, partition, sarama.OffsetNewest)
+		oldestOffset, err := client.GetOffset(topic, partition, sarama.OffsetOldest)
+
+		startOffset := fromOffset
+		if startOffset < oldestOffset {
+			startOffset = oldestOffset
+		}
+		if startOffset >= newestOffset {
+			Logger.Debugf("Partition %d has no new messages (startOffset=%d, latest=%d) — skipping", partition, startOffset, newestOffset)
+			continue
+		}
+
+		Logger.Debugf("Reading partition %d from offset %d to %d (oldest=%d)",
+			partition, startOffset, newestOffset-1, oldestOffset)
+
+		pc, err := consumer.ConsumePartition(topic, partition, startOffset)
+		if err != nil {
+			return err
+		}
+
+		expectedFinalOffset := newestOffset - 1
+		stallTimeout := 2 * time.Second
+		stallTimer := time.NewTimer(stallTimeout)
+		if !stallTimer.Stop() {
+			<-stallTimer.C
+		}
+
+	partitionLoop: // <---- labeled loop
+		for {
+			select {
+			case <-ctx.Done():
+				Logger.Debugf("Context cancelled during ReadToEnd")
+				pc.Close()
+				return ctx.Err()
+
+			case message, ok := <-pc.Messages():
+				if !ok {
+					Logger.Debugf("Partition consumer closed for partition %d", partition)
+					pc.Close()
+					break partitionLoop
+				}
+
+				// reset stall timer
+				if !stallTimer.Stop() {
+					select {
+					case <-stallTimer.C:
+					default:
+					}
+				}
+				stallTimer.Reset(stallTimeout)
+
+				id := fmt.Sprintf("%s_%d_%d", topic, partition, message.Offset)
+				callbackFunction(id, message.Key, message.Timestamp, message.Value)
+
+				if message.Offset >= expectedFinalOffset {
+					Logger.Debugf("Reached end of partition %d at offset %d", partition, message.Offset)
+					pc.AsyncClose()
+					// Drain until closed
+					for range pc.Messages() {
+					}
+					break partitionLoop
+				}
+
+			case <-stallTimer.C:
+				Logger.Debugf("No progress for %v on partition %d, assuming done",
+					stallTimeout, partition)
+				pc.AsyncClose()
+				for range pc.Messages() {
+				}
+				break partitionLoop
+			}
+		} // end partitionLoop
+
+		if !stallTimer.Stop() {
+			select {
+			case <-stallTimer.C:
+			default:
+			}
+		}
+		pc.Close()
+	}
+
+	Logger.Debugf("ReadToEnd finished for topic %s", topic)
 	return nil
 }

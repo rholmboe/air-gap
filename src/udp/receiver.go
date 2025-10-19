@@ -1,97 +1,168 @@
 package udp
 
 import (
+	"context"
+	"fmt"
 	"net"
+	"runtime"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"sitia.nu/airgap/src/logging"
 )
 
+type UDPAdapterLinux struct {
+	addr                 string
+	conns                []*net.UDPConn
+	closed               atomic.Bool
+	closeOnce            sync.Once
+	wg                   sync.WaitGroup
+	numReceivers         int
+	channelBufferSize    int
+	mtu                  uint16
+	readBufferMultiplier uint16
+}
+
 var Logger = logging.Logger
 
-// Start a UDP listener on the assigned port and address, stoppable via stopChan
-func ListenUDPWithStop(address string, port int, callback func(arg []byte), mtu uint16, stopChan <-chan struct{}) {
-	addr := net.UDPAddr{
-		Port: port,
-		IP:   net.ParseIP(address),
+func (u *UDPAdapterLinux) Setup(
+	mtu uint16,
+	numReceivers int,
+	channelBufferSize int,
+	readBufferMultiplier uint16,
+) {
+	u.mtu = mtu
+	u.numReceivers = numReceivers
+	u.channelBufferSize = channelBufferSize
+	u.readBufferMultiplier = readBufferMultiplier
+}
+
+func NewUDPAdapterLinux(addr string) *UDPAdapterLinux {
+	return &UDPAdapterLinux{
+		addr:                 addr,
+		numReceivers:         8,
+		channelBufferSize:    8192,
+		mtu:                  1500,
+		readBufferMultiplier: 16,
 	}
+}
 
-	conn, err := net.ListenUDP("udp", &addr)
-	if err != nil {
-		Logger.Errorf("Error starting UDP listener: %v", err)
-		return
-	}
-	defer conn.Close()
+// Listen starts multiple sockets for SO_REUSEPORT
+func (u *UDPAdapterLinux) Listen(ip string, port int, rcvBufSize int, handler func([]byte), stopChan <-chan struct{}) {
+	addrStr := net.JoinHostPort(ip, fmt.Sprintf("%d", port))
+	Logger.Printf("UDP listener starting on %s with %d workers (MTU=%d)", addrStr, u.numReceivers, u.mtu)
 
-	Logger.Printf("Listening on %s", addr.String())
+	packetChan := make(chan []byte, u.channelBufferSize)
 
-	buf := make([]byte, mtu)
-	done := false
-	for !done {
-		select {
-		case <-stopChan:
-			Logger.Printf("UDP server on %s stopping due to signal\n", addr.String())
-			conn.Close() // force ReadFromUDP to return
-			done = true
-		default:
-			conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-			n, _, err := conn.ReadFromUDP(buf)
-			if err != nil {
-				if ne, ok := err.(net.Error); ok && ne.Timeout() {
-					continue // check stopChan again
+	// --- start worker goroutines ---
+	for i := 0; i < u.numReceivers; i++ {
+		u.wg.Add(1)
+		go func(id int) {
+			defer u.wg.Done()
+			runtime.LockOSThread()
+			defer runtime.UnlockOSThread()
+
+			for {
+				select {
+				case pkt := <-packetChan:
+					if pkt == nil {
+						return
+					}
+					handler(pkt)
+				case <-stopChan:
+					return
 				}
-				// If conn is closed, exit loop
-				if opErr, ok := err.(*net.OpError); ok && opErr.Err.Error() == "use of closed network connection" {
-					done = true
-					continue
-				}
-				Logger.Errorf("Error reading from UDP connection: %v", err)
-				continue
 			}
-			// Copy the data before passing it to the callback
-			callback(append([]byte(nil), buf[:n]...))
+		}(i)
+	}
+
+	// --- create one socket per worker using SO_REUSEPORT ---
+	for i := 0; i < u.numReceivers; i++ {
+		lc := net.ListenConfig{
+			Control: func(network, address string, c syscall.RawConn) error {
+				return c.Control(func(fd uintptr) {
+					_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
+					_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
+					_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUF, rcvBufSize)
+				})
+			},
 		}
+
+		conn, err := lc.ListenPacket(context.Background(), "udp", addrStr)
+		if err != nil {
+			Logger.Fatalf("Failed to listen on %s: %v", addrStr, err)
+		}
+		udpConn := conn.(*net.UDPConn)
+		u.conns = append(u.conns, udpConn)
+
+		u.wg.Add(1)
+		// Worker thread for reading from this socket
+		go func(c *net.UDPConn) {
+			defer u.wg.Done()
+			readBuf := make([]byte, int(u.mtu)*int(u.readBufferMultiplier))
+
+			for {
+				select {
+				case <-stopChan:
+					return
+				default:
+					c.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+					n, _, err := c.ReadFromUDP(readBuf)
+					if err != nil {
+						if ne, ok := err.(net.Error); ok && ne.Timeout() {
+							continue
+						}
+						if u.closed.Load() {
+							return
+						}
+						Logger.Errorf("UDP read error: %v", err)
+						continue
+					}
+					buf := make([]byte, n)
+					copy(buf, readBuf[:n])
+
+					select {
+					case packetChan <- buf:
+					case <-stopChan:
+						return
+					}
+				}
+			}
+		}(udpConn)
+	}
+
+	// Wait for stop signal
+	<-stopChan
+
+	// --- shutdown ---
+	u.Close()
+	close(packetChan)
+
+	// Give workers a small timeout to finish processing remaining messages
+	timeout := time.After(2 * time.Second)
+	done := make(chan struct{})
+	go func() {
+		u.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-timeout:
+		Logger.Warnf("UDPAdapter shutdown timeout reached, some messages may be lost")
 	}
 }
 
-// Handle a connection
-// Just call the callback function with the data for every received packet
-func handleConnection(conn *net.UDPConn, _ *net.UDPAddr, wg *sync.WaitGroup, callback func(arg []byte), mtu uint16) {
-	defer wg.Done()
-
-	buf := make([]byte, mtu)
-	n, _, err := conn.ReadFromUDP(buf)
-	if err != nil {
-		Logger.Errorf("Error reading from UDP connection: %v", err)
-		return
-	}
-	callback(buf[:n])
-}
-
-// Start a UDP listener on the assigned port and address
-func ListenUDP(address string, port int, callback func(arg []byte), mtu uint16) {
-	addr := net.UDPAddr{
-		Port: port,
-		IP:   net.ParseIP(address),
-	}
-
-	conn, err := net.ListenUDP("udp", &addr)
-	if err != nil {
-		Logger.Errorf("Error starting UDP listener: %v", err)
-		return
-	}
-	defer conn.Close()
-
-	Logger.Printf("Listening on %s\n", addr.String())
-
-	var wg sync.WaitGroup
-
-	for {
-		wg.Add(1)
-		go func() {
-			handleConnection(conn, &addr, &wg, callback, mtu)
-		}()
-		wg.Wait()
-	}
+// Close closes all sockets
+func (u *UDPAdapterLinux) Close() error {
+	u.closeOnce.Do(func() {
+		u.closed.Store(true)
+		for _, c := range u.conns {
+			c.Close()
+		}
+	})
+	return nil
 }
