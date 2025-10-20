@@ -1,5 +1,8 @@
 # air-gap Kafka to Kafka Topic Transfer over UDP with Guaranteed Delivery
-This project aims to solve the problem of transferring events from a Kafka topic in near real time over an unsecure UDP connection with guaranteed once-only delivery of the events. This can be useful, e.g., for transmitting log events over a hardware diode. The information leaving the sending side may be encrypted with symmetric keys and the key exchange is automatic with use of public key encryption. 
+
+This project aims to solve the problem of transferring events from a Kafka topic in near real time over an unsecure UDP connection with guaranteed once-only delivery of the events. This can be useful, e.g., for transmitting log events over a hardware diode. The information leaving the sending side may be encrypted with symmetric keys and the key exchange is automatic with use of public key encryption.
+
+## Overview
 
 In Kafka, events may have a key and a value. The key part of events upstreams will be lost in the transmission, since the key part downstream is used for message identification and thus detection of lost messages (gap-detection). 
 
@@ -318,24 +321,140 @@ Some problems that may arise are:
 The applications responds to os signals and can be installed as a service in, e.g., Linux. 
 See https://fabianlee.org/2022/10/29/golang-running-a-go-binary-as-a-systemd-service-on-ubuntu-22-04/
 
-## Compile
-There is a Makefile that will get the latest tag from git and save in version.go, then build upstream and downstream.
-```bash
-make            # builds both upstream and downstream as well as building the deduplication Java project
-make upstream   # builds only upstream
-make downstream # builds only downstream
-make clean      # removes binaries and version.go, then performs a make
-```
-To build manually, change directory to the application you would like to build (./src/upstream, ...). 
-Compile the applications with `go build {filename}`.
+## Build System
 
-Example:
+The project uses a modular Makefile-based build system that supports building Go binaries, Java applications, and system packages (RPM, DEB, APK).
+
+### Quick Build Commands
+
 ```bash
+# Build everything (Go + Java)
+make all
+
+# Build only Go components
+make build-go
+
+# Build only Java deduplication application
+make build-java
+
+# Build all packages (RPM, DEB, APK for all components)
+make package-all
+
+# Build specific component packages
+make package-upstream       # All formats (rpm, deb, apk)
+make package-downstream
+make package-dedup
+
+# Build specific package format
+make package-upstream-rpm
+make package-upstream-deb
+make package-downstream-rpm
+# ... etc
+
+# Run tests
+make test                   # Run Go and Java tests
+make test-go               # Go tests only
+make test-java             # Java tests only
+
+# Clean build artifacts
+make clean                 # Remove all build artifacts
+make clean-packages        # Remove only package artifacts
+
+# Show all available targets
+make help
+```
+
+### Build System Architecture
+
+The build system is organized into modular components in the `build/` directory:
+
+- **`build/variables.mk`** - Common variables and paths
+- **`build/go.mk`** - Go binary compilation (upstream, downstream, create, resend)
+- **`build/java.mk`** - Java deduplication application build
+- **`build/package.mk`** - Package creation with nfpm (RPM, DEB, APK)
+- **`build/test.mk`** - Test execution and validation
+
+All binaries are built to `target/linux-amd64/` by default, and packages are created in `target/dist/`.
+
+### Manual Build
+
+To build manually without Make:
+
+```bash
+# Go applications
 cd src/cmd/upstream
 go build -o upstream main.go
+
+# Java application
+cd java-streams
+mvn clean package
 ```
 
-Now we have a compiled file called `upstream`. We can run the application with `./upstream`, but you will still need a configuration file.
+## Packaging
+
+The project includes production-ready system packages for major Linux distributions using [nfpm](https://nfpm.goreleaser.com/):
+
+### Package Formats
+
+- **RPM** - For RHEL, CentOS, Fedora, Rocky Linux, AlmaLinux
+- **DEB** - For Debian, Ubuntu
+- **APK** - For Alpine Linux
+
+### Package Contents
+
+Each package includes:
+- Compiled binaries installed to `/usr/local/bin/`
+- Systemd service files for easy daemon management
+- User/group creation (`airgap` user)
+- Configuration templates
+- Automatic dependency installation
+
+### Package Testing
+
+Docker-based package testing is available in the `tests/` directory:
+
+```bash
+# Start test containers
+cd tests
+docker-compose up -d
+
+# Test RPM packages on Rocky Linux
+docker-compose exec rocky bash /scripts/test-rpm.sh
+
+# Test DEB packages on Ubuntu
+docker-compose exec ubuntu bash /scripts/test-deb.sh
+
+# Test APK packages on Alpine
+docker-compose exec alpine sh /scripts/test-apk.sh
+
+# Cleanup
+docker-compose down
+```
+
+### Installation
+
+After building packages with `make package-all`, install them on your target system:
+
+**RPM-based systems:**
+```bash
+sudo dnf install target/dist/airgap-upstream-*.rpm
+sudo dnf install target/dist/airgap-downstream-*.rpm
+sudo dnf install target/dist/airgap-dedup-*.rpm
+```
+
+**DEB-based systems:**
+```bash
+sudo apt install ./target/dist/airgap-upstream_*_amd64.deb
+sudo apt install ./target/dist/airgap-downstream_*_amd64.deb
+sudo apt install ./target/dist/airgap-dedup_*_amd64.deb
+```
+
+**Alpine:**
+```bash
+sudo apk add --allow-untrusted target/dist/airgap-upstream-*.apk
+sudo apk add --allow-untrusted target/dist/airgap-downstream-*.apk
+sudo apk add --allow-untrusted target/dist/airgap-dedup-*.apk
+```
 
 ## Run the upstream and downstream applications as Linux services (systemd)
 To turn the application into a service we need to create a service file: `/etc/systemd/system/upstream.service`
